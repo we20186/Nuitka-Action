@@ -1,4 +1,4 @@
-name: Ultimate Nuitka Build (Fixed & Optimized)
+name: Ultimate Nuitka Build (Fixed Plugin Error)
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
         required: true
         default: 'video_sprites_gui_enhanced_v7_6.py'
       icon_file:
-        description: '图标文件 (如: exe.ico 或 ddaa.ico，留空则自动检测)'
+        description: '图标文件 (如: exe.ico，留空则自动检测)'
         required: false
         default: 'exe.ico'
       output_name:
@@ -24,7 +24,7 @@ on:
           - onefile
           - standalone
       enable_plugins:
-        description: '额外插件 (逗号分隔，默认已启用 pyside6)'
+        description: '额外插件 (逗号分隔，如: tk-inter,numpy)'
         required: false
         default: ''
 
@@ -48,28 +48,28 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "Starting deep cleanup to maximize disk space..."
-          # 修复报错：静默清理类型数据
+          # 静默清理类型数据，防止报错
           Remove-TypeData * -ErrorAction SilentlyContinue
           
           $ErrorActionPreference = 'SilentlyContinue'
-          # 移除大型不需要的工具链 (可腾出 20GB+ 空间)
+          # 移除大型预装组件 (腾出约 20GB+ 空间)
           Remove-Item -Recurse -Force "C:\Microsoft\AndroidSDK"
           Remove-Item -Recurse -Force "$env:AGENT_TOOLSDIRECTORY\CodeQL"
           Remove-Item -Recurse -Force "$env:AGENT_TOOLSDIRECTORY\Java_Temurin-Hotspot_jdk"
           Remove-Item -Recurse -Force "$env:AGENT_TOOLSDIRECTORY\node"
           
-          # 清理系统临时文件
+          # 清理临时文件
           Remove-Item -Path "C:\Users\runneradmin\AppData\Local\Temp\*" -Recurse -Force
           
           [System.GC]::Collect()
-          Write-Host "Disk cleanup successful."
+          Write-Host "Disk cleanup completed."
 
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          # 安装打包性能优化库
+          # 安装加速库
           pip install zstandard ordered-set
-          # 安装项目需求
+          # 安装项目依赖
           if (Test-Path "requirements.txt") { 
             pip install -r requirements.txt 
           } else {
@@ -84,10 +84,9 @@ jobs:
           $entry = "${{ github.event.inputs.entry_point }}"
           if (!(Test-Path $entry)) {
             $entry = Get-ChildItem -Filter "*.py" | Select-Object -First 1 -ExpandProperty Name
-            Write-Host "Warning: Input file not found, using detected: $entry"
           }
 
-          # 2. 确定图标文件 (检测逻辑: 用户输入 -> exe.ico -> 任意.ico -> 无)
+          # 2. 确定图标文件 (检测逻辑: 用户输入 -> exe.ico -> 任意.ico)
           $icon = "${{ github.event.inputs.icon_file }}"
           if ($icon -eq "" -or !(Test-Path $icon)) {
             if (Test-Path "exe.ico") { $icon = "exe.ico" }
@@ -121,24 +120,23 @@ jobs:
           script-name: ${{ steps.detect.outputs.entry }}
           output-file: ${{ steps.detect.outputs.name }}
           output-dir: build
-          
-          # 修正后的参数映射：
-          # Nuitka-Action 使用 mode 来区分 onefile/standalone
           mode: ${{ github.event.inputs.build_mode }}
           
-          # 性能优化：最大化 CPU 利用
+          # 最大化利用 CPU
           jobs: ${{ env.NUMBER_OF_PROCESSORS }}
           
-          # GUI 与 图标设置
+          # GUI 设置与图标
           disable-console: true
           windows-icon-from-ico: ${{ steps.detect.outputs.icon }}
           windows-uac-admin: true
           
-          # 插件与依赖包 (针对 PySide6 和 AI 库)
-          enable-plugins: pyside6,${{ github.event.inputs.enable_plugins }}
+          # 核心修复：动态拼接插件字符串，防止末尾出现多余逗号
+          enable-plugins: ${{ github.event.inputs.enable_plugins != '' && format('pyside6,{0}', github.event.inputs.enable_plugins) || 'pyside6' }}
+          
+          # AI 库支持
           include-package: rembg,onnxruntime
           
-          # 其他优化设置
+          # 其他优化
           assume-yes-for-downloads: true
           onefile-tempdir-spec: "{CACHE_DIR}/${{ steps.detect.outputs.name }}/v1"
           disable-cache: false
@@ -146,7 +144,7 @@ jobs:
       - name: Post-Build Cleanup
         shell: pwsh
         run: |
-          # 清理庞大的编译中间目录（.build），只保留最终生成物
+          # 清理庞大的编译临时目录（.build），最大化节省空间
           $buildFolder = "build/${{ steps.detect.outputs.name }}.build"
           if (Test-Path $buildFolder) { Remove-Item -Recurse -Force $buildFolder }
           pip cache purge
