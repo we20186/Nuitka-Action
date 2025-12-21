@@ -1,0 +1,132 @@
+name: High-Performance Nuitka Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      entry_point:
+        description: '入口 Python 文件 (例如: main.py 或 bbo.py)'
+        required: true
+        default: 'main.py'
+      icon_file:
+        description: '图标文件 (例如: exe.ico 或 ddaa.ico，留空则自动检测)'
+        required: false
+        default: 'exe.ico'
+      output_name:
+        description: '生成的程序名称 (留空则使用入口文件名)'
+        required: false
+        default: ''
+      build_mode:
+        description: '打包模式 (onefile: 单文件, standalone: 单文件夹)'
+        required: true
+        default: 'onefile'
+        type: choice
+        options:
+          - onefile
+          - standalone
+      enable_plugins:
+        description: '需要启用的插件 (逗号分隔，如: tk-inter,numpy,pyside6)'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    runs-on: windows-latest  # Windows 环境最适合打包 EXE
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1 # 只拉取最新提交，节省硬盘
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip' # 自动缓存 pip 依赖
+
+      - name: Free Disk Space (Optimization)
+        shell: pwsh
+        run: |
+          # 清理 GitHub Runner 中不必要的工具链以释放几十GB空间
+          Remove-Item -Recurse -Force "C:\Microsoft\AndroidSDK" -ErrorAction SilentlyContinue
+          Remove-TypeData * # 释放内存中的类型数据
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if (Test-Path "requirements.txt") { pip install -r requirements.txt }
+          pip install nuitka zstandard # zstandard 提高压缩率
+
+      - name: Auto-Detect Files and Set Variables
+        id: detect
+        shell: pwsh
+        run: |
+          # 1. 确定入口文件
+          $entry = "${{ github.event.inputs.entry_point }}"
+          if (!(Test-Path $entry)) {
+            $entry = Get-ChildItem -Filter "*.py" | Select-Object -First 1 -ExpandProperty Name
+            Write-Host "Warning: Input file not found, using detected: $entry"
+          }
+
+          # 2. 确定图标文件
+          $icon = "${{ github.event.inputs.icon_file }}"
+          if ($icon -eq "" -or !(Test-Path $icon)) {
+            if (Test-Path "exe.ico") { $icon = "exe.ico" }
+            else { 
+              $foundIcon = Get-ChildItem -Filter "*.ico" | Select-Object -First 1 -ExpandProperty Name
+              if ($foundIcon) { $icon = $foundIcon } else { $icon = "" }
+            }
+          }
+
+          # 3. 确定程序名称
+          $name = "${{ github.event.inputs.output_name }}"
+          if ($name -eq "") { $name = [System.IO.Path]::GetFileNameWithoutExtension($entry) }
+
+          echo "entry=$entry" >> $env:GITHUB_OUTPUT
+          echo "icon=$icon" >> $env:GITHUB_OUTPUT
+          echo "name=$name" >> $env:GITHUB_OUTPUT
+
+      - name: Nuitka Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\AppData\Local\Nuitka\Nuitka\Cache
+          key: ${{ runner.os }}-nuitka-${{ hashFiles('**/*.py') }}
+          restore-keys: |
+            ${{ runner.os }}-nuitka-
+
+      - name: Build Executable with Nuitka
+        uses: Nuitka/Nuitka-Action@main
+        with:
+          nuitka-version: main
+          script-name: ${{ steps.detect.outputs.entry }}
+          output-file: ${{ steps.detect.outputs.name }}
+          onefile: ${{ github.event.inputs.build_mode == 'onefile' }}
+          standalone: ${{ github.event.inputs.build_mode == 'standalone' }}
+          # 自动应用图标到窗口、任务栏、标题栏
+          windows-icon-from-ico: ${{ steps.detect.outputs.icon }}
+          # 性能优化：使用多核、禁用控制台（如果是GUI）、启用zstd压缩
+          nuitka-arguments: |
+            --jobs=${{ env.NUMBER_OF_PROCESSORS }}
+            --onefile-tempdir-spec="{CACHE_DIR}/${{ steps.detect.outputs.name }}/v1"
+            --enable-plugin=${{ github.event.inputs.enable_plugins }}
+            --windows-uac-admin
+            --assume-yes-for-downloads
+          # 这里的 jobs 利用了 GitHub 提供的多核 CPU
+
+      - name: Post-Build Cleanup
+        shell: pwsh
+        run: |
+          # 清理构建过程中的中间文件，防止占用过多磁盘影响上传
+          if (Test-Path "build") { Remove-Item -Recurse -Force "build" }
+          # 清理 pip 缓存
+          pip cache purge
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.detect.outputs.name }}-Binary
+          path: |
+            build/*.exe
+            build/*.dist
+          retention-days: 7
