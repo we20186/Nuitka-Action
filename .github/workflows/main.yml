@@ -1,14 +1,14 @@
-name: Extreme Performance Nuitka Build
+name: Ultimate Nuitka Build (Fixed & Optimized)
 
 on:
   workflow_dispatch:
     inputs:
       entry_point:
-        description: '入口 Python 文件 (如: main.py 或 video_sprites_gui_enhanced_v7_6.py)'
+        description: '入口 Python 文件 (如: main.py 或 bbo.py)'
         required: true
         default: 'video_sprites_gui_enhanced_v7_6.py'
       icon_file:
-        description: '图标文件 (如: exe.ico，留空则自动搜索 .ico)'
+        description: '图标文件 (如: exe.ico 或 ddaa.ico，留空则自动检测)'
         required: false
         default: 'exe.ico'
       output_name:
@@ -16,13 +16,17 @@ on:
         required: false
         default: ''
       build_mode:
-        description: '打包模式 (onefile: 单文件, standalone: 单文件夹)'
+        description: '打包模式'
         required: true
         default: 'onefile'
         type: choice
         options:
           - onefile
           - standalone
+      enable_plugins:
+        description: '额外插件 (逗号分隔，默认已启用 pyside6)'
+        required: false
+        default: ''
 
 jobs:
   build:
@@ -44,17 +48,17 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "Starting deep cleanup to maximize disk space..."
-          # 修复之前的报错：添加 SilentlyContinue
+          # 修复报错：静默清理类型数据
           Remove-TypeData * -ErrorAction SilentlyContinue
           
           $ErrorActionPreference = 'SilentlyContinue'
-          # 移除大型预装组件（可腾出约 20GB+ 空间）
+          # 移除大型不需要的工具链 (可腾出 20GB+ 空间)
           Remove-Item -Recurse -Force "C:\Microsoft\AndroidSDK"
           Remove-Item -Recurse -Force "$env:AGENT_TOOLSDIRECTORY\CodeQL"
           Remove-Item -Recurse -Force "$env:AGENT_TOOLSDIRECTORY\Java_Temurin-Hotspot_jdk"
           Remove-Item -Recurse -Force "$env:AGENT_TOOLSDIRECTORY\node"
           
-          # 清理临时文件
+          # 清理系统临时文件
           Remove-Item -Path "C:\Users\runneradmin\AppData\Local\Temp\*" -Recurse -Force
           
           [System.GC]::Collect()
@@ -63,9 +67,9 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          # 显式安装打包辅助库
+          # 安装打包性能优化库
           pip install zstandard ordered-set
-          # 安装项目依赖
+          # 安装项目需求
           if (Test-Path "requirements.txt") { 
             pip install -r requirements.txt 
           } else {
@@ -76,14 +80,14 @@ jobs:
         id: detect
         shell: pwsh
         run: |
-          # 1. 入口文件检测
+          # 1. 确定入口文件
           $entry = "${{ github.event.inputs.entry_point }}"
           if (!(Test-Path $entry)) {
             $entry = Get-ChildItem -Filter "*.py" | Select-Object -First 1 -ExpandProperty Name
-            Write-Host "Warning: Entry point not found, using: $entry"
+            Write-Host "Warning: Input file not found, using detected: $entry"
           }
 
-          # 2. 图标检测 (exe.ico -> 任何.ico -> 无)
+          # 2. 确定图标文件 (检测逻辑: 用户输入 -> exe.ico -> 任意.ico -> 无)
           $icon = "${{ github.event.inputs.icon_file }}"
           if ($icon -eq "" -or !(Test-Path $icon)) {
             if (Test-Path "exe.ico") { $icon = "exe.ico" }
@@ -93,14 +97,13 @@ jobs:
             }
           }
 
-          # 3. 程序名称
+          # 3. 确定程序名称
           $name = "${{ github.event.inputs.output_name }}"
           if ($name -eq "") { $name = [System.IO.Path]::GetFileNameWithoutExtension($entry) }
 
           echo "entry=$entry" >> $env:GITHUB_OUTPUT
           echo "icon=$icon" >> $env:GITHUB_OUTPUT
           echo "name=$name" >> $env:GITHUB_OUTPUT
-          Write-Host "Ready to build: $name using $entry with icon $icon"
 
       - name: Nuitka Cache
         uses: actions/cache@v4
@@ -117,29 +120,35 @@ jobs:
           nuitka-version: main
           script-name: ${{ steps.detect.outputs.entry }}
           output-file: ${{ steps.detect.outputs.name }}
-          onefile: ${{ github.event.inputs.build_mode == 'onefile' }}
-          standalone: ${{ github.event.inputs.build_mode == 'standalone' }}
-          # 自动应用图标到所有位置
+          output-dir: build
+          
+          # 修正后的参数映射：
+          # Nuitka-Action 使用 mode 来区分 onefile/standalone
+          mode: ${{ github.event.inputs.build_mode }}
+          
+          # 性能优化：最大化 CPU 利用
+          jobs: ${{ env.NUMBER_OF_PROCESSORS }}
+          
+          # GUI 与 图标设置
+          disable-console: true
           windows-icon-from-ico: ${{ steps.detect.outputs.icon }}
-          # 针对 PySide6 和 AI 库的优化参数
-          nuitka-arguments: |
-            --jobs=${{ env.NUMBER_OF_PROCESSORS }}
-            --enable-plugin=pyside6
-            --windows-disable-console
-            --include-package=rembg
-            --include-package=onnxruntime
-            --collect-submodules=rembg
-            --assume-yes-for-downloads
-            --onefile-tempdir-spec="{CACHE_DIR}/${{ steps.detect.outputs.name }}/v1"
-            --output-dir=build
-          # 这里的 jobs 利用多核 CPU，zstandard 自动被 Nuitka 调用进行压缩
+          windows-uac-admin: true
+          
+          # 插件与依赖包 (针对 PySide6 和 AI 库)
+          enable-plugins: pyside6,${{ github.event.inputs.enable_plugins }}
+          include-package: rembg,onnxruntime
+          
+          # 其他优化设置
+          assume-yes-for-downloads: true
+          onefile-tempdir-spec: "{CACHE_DIR}/${{ steps.detect.outputs.name }}/v1"
+          disable-cache: false
 
       - name: Post-Build Cleanup
         shell: pwsh
         run: |
-          # 移除构建产生的庞大临时目录以释放空间以便上传
-          $buildDir = "build/${{ steps.detect.outputs.name }}.build"
-          if (Test-Path $buildDir) { Remove-Item -Recurse -Force $buildDir }
+          # 清理庞大的编译中间目录（.build），只保留最终生成物
+          $buildFolder = "build/${{ steps.detect.outputs.name }}.build"
+          if (Test-Path $buildFolder) { Remove-Item -Recurse -Force $buildFolder }
           pip cache purge
 
       - name: Upload Artifact
