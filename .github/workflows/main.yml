@@ -6,7 +6,7 @@ on:
       entry_point:
         description: '入口 Python 文件 (如: main.py 或 bbo.py)'
         required: true
-        default: 'video_sprites_gui_enhanced_v7_6.py'
+        default: 'biekuai.py'
       icon_file:
         description: '图标文件 (如: exe.ico，留空则自动检测)'
         required: false
