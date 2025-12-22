@@ -1,5595 +1,4385 @@
-# biekuai.py
-# Enhanced version v7.6 - 极速专业版 (完整修复版)
-# 
-# 【v7.6 修复与改进】
-# - 修复试用退出机制：使用总秒数倒计时，确保准确退出
-# - 添加颜色选择器：所有背景色输入都支持可视化选择
-# - 优化用户体验：颜色预览、预设颜色、友好的交互
-# - 安全退出流程：停止任务 -> 提示用户 -> 延迟退出
-#
-# Dependencies:
-# pip install opencv-python pillow PySide6 numpy rembg imageio imageio-ffmpeg onnxruntime
+# -*- coding: utf-8 -*-
+"""
+笔记本高清视频修复 2025 V7.0 - 后期处理专版
+============================================
+✅ 【全新UI】仿Video2X风格界面
+✅ 【任务列表】多任务管理，队列式处理
+✅ 【可折叠日志】右侧日志面板可收缩
+✅ 【新建任务对话框】统一的任务配置界面
+✅ 【H.264编码】更好的视频兼容性
+============================================
 
-import sys
-import os
-import math
-import traceback
-import shutil
-import hashlib
-import subprocess
-import threading
-import queue
-import time
-import json
-import gc
-import urllib.request
-import urllib.error
-from pathlib import Path
-from datetime import datetime, date
-from io import BytesIO
-from collections import Counter
+专业8步修复流程：
+1. 伪影移除 - 去块、去色带
+2. 预锐化+回调 - 边缘增强（自动回调）
+3. 反锯齿 + 边缘精修
+4. 去噪
+5. 人脸修复
+6. 毛发保护
+7. 最终轻锐化
+8. 轻微加颗粒（可选）
+"""
+
+import os, sys, subprocess, threading, cv2, numpy as np, hashlib, time, shutil, tempfile
+import urllib.request, zipfile, ssl, json, glob, uuid
+from datetime import date
+from tkinter import (Label, Button, Text, filedialog, ttk, messagebox, Frame, 
+                     BooleanVar, Checkbutton, StringVar, END, Toplevel, Canvas, 
+                     LabelFrame, Entry, Scrollbar, VERTICAL, RIGHT, Y, BOTH, LEFT,
+                     DISABLED, NORMAL, Scale, HORIZONTAL, DoubleVar, IntVar,
+                     Listbox, SINGLE, TOP, BOTTOM, X, W, E, N, S, NW, NE, SW, SE,
+                     CENTER, RIDGE, GROOVE, SUNKEN, RAISED, FLAT)
+from tkinter.ttk import Progressbar, Style, Treeview, Separator
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from PIL import Image, ImageTk
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Any
+from enum import Enum
 
-# ==================== 设置模型路径环境变量 ====================
-BIEMO_DIR = Path.cwd() / "biemo"
-BIEMO_DIR.mkdir(parents=True, exist_ok=True)
 
-# 设置 rembg/u2net 模型下载路径
-os.environ["U2NET_HOME"] = str(BIEMO_DIR / "models")
-os.environ["REMBG_HOME"] = str(BIEMO_DIR / "models")
-
-# 确保模型目录存在
-(BIEMO_DIR / "models").mkdir(parents=True, exist_ok=True)
-
-# ==================== 依赖检测系统 ====================
-class DependencyChecker:
-    """检测所有必要的依赖库"""
-    
-    REQUIRED_PACKAGES = [
-        ("cv2", "opencv-python", "图像处理核心库"),
-        ("PIL", "Pillow", "图像格式支持"),
-        ("numpy", "numpy", "数值计算"),
-        ("imageio", "imageio", "视频/GIF读写"),
-    ]
-    
-    OPTIONAL_PACKAGES = [
-        ("rembg", "rembg[gpu]", "AI背景移除 (核心功能)"),
-        ("onnxruntime", "onnxruntime", "AI推理引擎 (CPU)"),
-    ]
-    
-    results = {}
-    missing_required = []
-    missing_optional = []
-    install_commands = []
-    
-    @classmethod
-    def check_all(cls):
-        cls.results = {}
-        cls.missing_required = []
-        cls.missing_optional = []
-        cls.install_commands = []
-        
-        for module_name, pip_name, desc in cls.REQUIRED_PACKAGES:
-            try:
-                __import__(module_name)
-                cls.results[module_name] = ("ok", desc)
-            except ImportError:
-                cls.results[module_name] = ("missing", desc)
-                cls.missing_required.append((pip_name, desc))
-                cls.install_commands.append(f"pip install {pip_name}")
-        
-        for module_name, pip_name, desc in cls.OPTIONAL_PACKAGES:
-            try:
-                __import__(module_name)
-                cls.results[module_name] = ("ok", desc)
-            except ImportError:
-                cls.results[module_name] = ("missing", desc)
-                cls.missing_optional.append((pip_name, desc))
-        
-        return cls
-    
-    @classmethod
-    def get_install_command(cls):
-        if cls.missing_required:
-            pkgs = [p[0] for p in cls.missing_required]
-            return f"pip install {' '.join(pkgs)}"
-        return None
-    
-    @classmethod
-    def get_full_install_command(cls):
-        return "pip install opencv-python Pillow numpy imageio imageio-ffmpeg rembg[gpu] onnxruntime-gpu"
-    
-    @classmethod
-    def has_critical_missing(cls):
-        return len(cls.missing_required) > 0
-
-pass
-
-# 尝试导入可能缺失的库
-try:
-    import winsound
-    HAS_WINSOUND = True
-except:
-    HAS_WINSOUND = False
-
-try:
-    from PIL import Image
-    HAS_PIL = True
-except ImportError:
-    HAS_PIL = False
-    print("错误: Pillow 未安装")
-
-try:
-    import numpy as np
-    HAS_NUMPY = True
-except ImportError:
-    HAS_NUMPY = False
-    print("错误: numpy 未安装")
-
-try:
-    import cv2
-    HAS_CV2 = True
-except ImportError:
-    HAS_CV2 = False
-    print("错误: opencv-python 未安装")
-
-try:
-    import imageio
-    HAS_IMAGEIO = True
-except ImportError:
-    HAS_IMAGEIO = False
-    print("错误: imageio 未安装")
-
-try:
-    import psutil
-    HAS_PSUTIL = True
-except ImportError:
-    HAS_PSUTIL = False
-
-from PySide6.QtWidgets import (
-    QApplication, QWidget, QLabel, QPushButton, QListWidget, QSpinBox, QCheckBox,
-    QHBoxLayout, QVBoxLayout, QGridLayout, QFileDialog, QProgressBar, QMessageBox,
-    QTextEdit, QComboBox, QRadioButton, QButtonGroup, QGroupBox, QDoubleSpinBox,
-    QTabWidget, QLineEdit, QDialog, QFrame, QToolTip, QSplitter, QPlainTextEdit,
-    QListWidgetItem, QColorDialog, QTableWidget, QTableWidgetItem, QAbstractItemView,
-    QHeaderView, QSizePolicy, QSlider, QSpacerItem, QStackedWidget, QFormLayout,
-    QProgressDialog
-)
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QObject, QSize, QSignalBlocker
-from PySide6.QtGui import QFont, QColor, QPalette, QTextCursor, QIcon, QPixmap, QImage, QPainter, QPen, QBrush
-
-if False:
-    import rembg
-    import rembg.sessions.u2net
-    import rembg.sessions.isnet
-    import onnxruntime
-    import onnxruntime.capi.onnxruntime_pybind11_state
-
-# ==================== 图像处理辅助函数 ====================
-def make_square_with_padding(pil_img, padding=1):
-    """
-    将图片裁剪/扩展成正方形，保留指定像素的边距，确保内容居中
-    """
-    if pil_img is None:
-        return None
-        
-    width, height = pil_img.size
-    
-    # 1. 找到内容的边界框（非透明区域）
-    if pil_img.mode == 'RGBA':
-        bbox = pil_img.getbbox()  # 返回 (left, top, right, bottom)
-    else:
-        # 如果不是RGBA，假设整个图片都是内容
-        bbox = (0, 0, width, height)
-    
-    if bbox is None:
-        # 图片完全透明，直接返回一个正方形透明图
-        max_dim = max(width, height)
-        return Image.new('RGBA', (max_dim, max_dim), (0, 0, 0, 0))
-    
-    left, top, right, bottom = bbox
-    content_width = right - left
-    content_height = bottom - top
-    
-    # 2. 计算正方形边长（取内容最大边 + padding*2）
-    square_size = max(content_width, content_height) + padding * 2
-    
-    # 3. 计算内容在正方形中的居中位置
-    center_x = (left + right) // 2
-    center_y = (top + bottom) // 2
-    
-    # 4. 计算裁剪区域
-    crop_left = center_x - square_size // 2
-    crop_top = center_y - square_size // 2
-    crop_right = crop_left + square_size
-    crop_bottom = crop_top + square_size
-    
-    # 5. 创建新的正方形画布并粘贴内容
-    new_img = Image.new('RGBA', (square_size, square_size), (0, 0, 0, 0))
-    
-    # 计算偏移量，将原图内容居中放置
-    offset_x = max(0, -crop_left)
-    offset_y = max(0, -crop_top)
-    
-    # 调整裁剪区域到有效范围
-    src_left = max(0, crop_left)
-    src_top = max(0, crop_top)
-    src_right = min(width, crop_right)
-    src_bottom = min(height, crop_bottom)
-    
-    # 裁剪并粘贴
-    cropped = pil_img.crop((src_left, src_top, src_right, src_bottom))
-    new_img.paste(cropped, (offset_x, offset_y))
-    
-    return new_img
-
-# ==================== 配置管理器 ====================
-class ConfigManager:
-    """统一配置管理 - 所有路径都在 biemo 文件夹下"""
-    
-    BIEMO_BASE = Path.cwd() / "biemo"
-    CONFIG_FILE = BIEMO_BASE / "config.json"
-    MODELS_CONFIG_FILE = BIEMO_BASE / "models_config.json"
-    LICENSE_FILE = BIEMO_BASE / "tools" / "license.key"
-    
-    DEFAULT_CONFIG = {
-        "model_dir": str(BIEMO_BASE / "models"),
-        "output_paths": {
-            "sprite": str(BIEMO_BASE / "output_sprites"),
-            "extract": str(BIEMO_BASE / "output_images"),
-            "video": str(BIEMO_BASE / "output_videos"),
-            "gif": str(BIEMO_BASE / "output_gifs"),
-            "single": str(BIEMO_BASE / "output_single"),
-            "beiou": str(BIEMO_BASE / "output_beiou"),
-        },
-        "default_model": "isnet-general-use",
-        "default_threads": 4,
-        "enable_sound": True,
-        "auto_open_folder": True,
-        "model_mirrors": {
-            "global": "",
-            "cn": ""
-        }
-    }
-    
-    _config = None
-    
-    @classmethod
-    def init_directories(cls):
-        """初始化所有目录"""
-        cls.BIEMO_BASE.mkdir(parents=True, exist_ok=True)
-        (cls.BIEMO_BASE / "models").mkdir(parents=True, exist_ok=True)
-        (cls.BIEMO_BASE / "tools").mkdir(parents=True, exist_ok=True)
-        
-        for key in cls.DEFAULT_CONFIG["output_paths"]:
-            path = Path(cls.DEFAULT_CONFIG["output_paths"][key])
-            path.mkdir(parents=True, exist_ok=True)
-    
-    @classmethod
-    def get_biemo_dir(cls):
-        return cls.BIEMO_BASE
-    
-    @classmethod
-    def get_license_file(cls):
-        return str(cls.LICENSE_FILE)
-    
-    @classmethod
-    def load(cls):
-        if cls._config is not None:
-            return cls._config
-        
-        cls.init_directories()
-        cls._config = cls.DEFAULT_CONFIG.copy()
-        
-        try:
-            if cls.CONFIG_FILE.exists():
-                with open(cls.CONFIG_FILE, 'r', encoding='utf-8') as f:
-                    saved = json.load(f)
-                    for key, value in saved.items():
-                        if key == "output_paths":
-                            cls._config["output_paths"].update(value)
-                        else:
-                            cls._config[key] = value
-        except Exception as e:
-            print(f"配置加载失败: {e}")
-        
-        return cls._config
-    
-    @classmethod
-    def save(cls):
-        try:
-            cls.BIEMO_BASE.mkdir(parents=True, exist_ok=True)
-            with open(cls.CONFIG_FILE, 'w', encoding='utf-8') as f:
-                json.dump(cls._config, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            print(f"配置保存失败: {e}")
-    
-    @classmethod
-    def get(cls, key, default=None):
-        config = cls.load()
-        return config.get(key, default)
-    
-    @classmethod
-    def set(cls, key, value):
-        config = cls.load()
-        config[key] = value
-        cls.save()
-    
-    @classmethod
-    def get_model_dir(cls):
-        return str(cls.BIEMO_BASE / "models")
-    
-    @classmethod
-    def get_output_path(cls, key):
-        paths = cls.get("output_paths", cls.DEFAULT_CONFIG["output_paths"])
-        base_path = paths.get(key, str(cls.BIEMO_BASE / f"output_{key}"))
-        Path(base_path).mkdir(parents=True, exist_ok=True)
-        return base_path
-
-    @classmethod
-    def get_tools_dir(cls):
-        p = cls.BIEMO_BASE / "tools"
-        p.mkdir(parents=True, exist_ok=True)
-        return str(p)
-
-    @classmethod
-    def get_tool_path(cls, name: str):
-        p = Path(cls.get_tools_dir()) / (name + (".exe" if os.name == "nt" else ""))
-        return str(p) if p.exists() else name
-
-    @classmethod
-    def get_model_mirrors(cls):
-        mirrors = cls.get("model_mirrors", {"global": "", "cn": ""})
-        return mirrors if isinstance(mirrors, dict) else {"global": "", "cn": ""}
-
-ConfigManager.load()
-os.environ["U2NET_HOME"] = ConfigManager.get_model_dir()
-os.environ["REMBG_HOME"] = ConfigManager.get_model_dir()
-
-# ==================== 全局日志系统 ====================
-class LogManager(QObject):
-    log_signal = Signal(str, str)
-    
+# ==================== 0. 智能路径管理 ====================
+class PathManager:
     _instance = None
     
-    @classmethod
-    def instance(cls):
+    def __new__(cls):
         if cls._instance is None:
-            cls._instance = cls()
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
         return cls._instance
     
     def __init__(self):
-        super().__init__()
-        self.logs = []
+        if self._initialized:
+            return
+        self._initialized = True
+        self._init_paths()
     
-    def log(self, message: str, level: str = "info"):
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        formatted = f"[{timestamp}] {message}"
-        self.logs.append((formatted, level))
-        self.log_signal.emit(formatted, level)
-        print(f"[{level.upper()}] {message}")
+    def _init_paths(self):
+        if getattr(sys, 'frozen', False):
+            self.app_dir = os.path.dirname(sys.executable)
+        else:
+            self.app_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        possible_bases = [
+            self.app_dir,
+            os.path.join(self.app_dir, "ide2025"),
+            os.path.join(os.path.expanduser("~"), "ide2025"),
+            r"C:\ide2025",
+            os.path.join(os.environ.get('LOCALAPPDATA', ''), "ide2025"),
+        ]
+        
+        self.base_dir = self._select_best_base(possible_bases)
+        # 修改：将tools_dir改为fongzhuang文件夹
+        self.tools_dir = os.path.join(self.base_dir, "fongzhuang")
+        self.temp_dir = os.path.join(self.base_dir, "temp")
+        self.output_dir = os.path.join(self.base_dir, "output")
+        self.config_file = os.path.join(self.base_dir, "config.json")
+        
+        for d in [self.base_dir, self.tools_dir, self.temp_dir, self.output_dir]:
+            self._safe_makedirs(d)
+        
+        self.exes = {}
+        self._scan_ffmpeg()
+        self._save_config()
+
+    def _select_best_base(self, candidates):
+        for path in candidates:
+            if path and os.path.exists(os.path.join(path, "tools")):
+                return path
+        for path in candidates:
+            if path and self._is_writable(path):
+                return path
+        return self.app_dir
     
-    def info(self, msg): self.log(msg, "info")
-    def warning(self, msg): self.log(msg, "warning")
-    def error(self, msg): self.log(msg, "error")
-    def success(self, msg): self.log(msg, "success")
-
-    def pipe(self, message: str, level: str = "info"):
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        formatted = f"[{timestamp}] {message}"
-        self.logs.append((formatted, level))
-        self.log_signal.emit(formatted, level)
-
-logger = LogManager.instance()
-
-# ==================== 硬件检测 ====================
-class HardwareInfo:
-    gpu_available = False
-    gpu_name = "N/A"
-    gpu_memory_mb = 0
-    cpu_threads = os.cpu_count() or 4
-    onnx_providers = []
-    available_memory_mb = 4096
-    
-    @classmethod
-    def detect(cls):
+    def _is_writable(self, path):
         try:
-            import onnxruntime as ort
-            cls.onnx_providers = ort.get_available_providers()
-            
-            if 'CUDAExecutionProvider' in cls.onnx_providers:
-                cls.gpu_available = True
-                cls.gpu_name = "CUDA GPU"
-                try:
-                    import torch
-                    if torch.cuda.is_available():
-                        cls.gpu_memory_mb = torch.cuda.get_device_properties(0).total_memory // (1024 * 1024)
-                except:
-                    cls.gpu_memory_mb = 4096
-                logger.success("✓ GPU 加速已开启 (CUDA)")
-            elif 'DmlExecutionProvider' in cls.onnx_providers:
-                cls.gpu_available = True
-                cls.gpu_name = "DirectML GPU"
-                cls.gpu_memory_mb = 4096
-                logger.success("✓ GPU 加速已开启 (DirectML)")
-            else:
-                logger.warning("○ 正在使用 CPU 模式")
-                
-        except ImportError:
-            logger.error("✗ onnxruntime 未安装")
-        except Exception as e:
-            logger.error(f"硬件检测失败: {e}")
-        
-        if HAS_PSUTIL:
-            try:
-                cls.available_memory_mb = psutil.virtual_memory().available // (1024 * 1024)
-            except:
-                pass
-        
-        logger.info(f"CPU 线程数: {cls.cpu_threads}")
-        logger.info(f"可用内存: {cls.available_memory_mb} MB")
-        if cls.gpu_available:
-            logger.info(f"GPU 显存: {cls.gpu_memory_mb} MB")
-        return cls
-    
-    @classmethod
-    def has_sufficient_resources(cls, model_size_mb: int = 900) -> bool:
-        """检查是否有足够的资源处理大模型"""
-        if cls.gpu_available and cls.gpu_memory_mb >= model_size_mb * 2:
+            os.makedirs(path, exist_ok=True)
+            test_file = os.path.join(path, ".write_test")
+            with open(test_file, 'w') as f:
+                f.write("test")
+            os.remove(test_file)
             return True
-        if cls.available_memory_mb >= model_size_mb * 3:
-            return True
-        return False
-
-# ==================== 模型管理器 ====================
-class ModelManager:
-    """模型管理：统一文件名，支持用户导入模型"""
+        except:
+            return False
     
-    MODELS = {
-        "birefnet-general": {
-            "name": "BiRefNet 通用 (SOTA)",
-            "desc": "最高质量，需要较多资源",
-            "file": "BiRefNet-general-epoch_244.onnx",
-            "size_mb": 900,
-            "quality": 5,
-            "large": True
-        },
-        "birefnet-general-lite": {
-            "name": "BiRefNet Lite",
-            "desc": "快速高质量",
-            "file": "BiRefNet-general-bb_swin_v1_tiny-epoch_232.onnx",
-            "size_mb": 200,
-            "quality": 4,
-            "large": False
-        },
-        "birefnet-portrait": {
-            "name": "BiRefNet 人像",
-            "desc": "人像优化，需要较多资源",
-            "file": "BiRefNet-portrait-epoch_150.onnx",
-            "size_mb": 900,
-            "quality": 5,
-            "large": True
-        },
-        "isnet-general-use": {
-            "name": "ISNet 通用 ★推荐",
-            "desc": "推荐，平衡质量和速度",
-            "file": "isnet-general-use.onnx",
-            "size_mb": 170,
-            "quality": 4,
-            "large": False
-        },
-        "isnet-anime": {
-            "name": "ISNet 动漫",
-            "desc": "二次元/插画优化",
-            "file": "isnet-anime.onnx",
-            "size_mb": 170,
-            "quality": 4,
-            "large": False
-        },
-        "u2net": {
-            "name": "U²-Net 标准",
-            "desc": "经典稳定，兼容性好",
-            "file": "u2net.onnx",
-            "size_mb": 170,
-            "quality": 3,
-            "large": False
-        },
-        "u2netp": {
-            "name": "U²-Net 轻量 ★低配",
-            "desc": "最快速度，低配首选",
-            "file": "u2netp.onnx",
-            "size_mb": 4,
-            "quality": 2,
-            "large": False
-        },
-        "u2net_human_seg": {
-            "name": "U²-Net 人像",
-            "desc": "人体分割优化",
-            "file": "u2net_human_seg.onnx",
-            "size_mb": 170,
-            "quality": 3,
-            "large": False
-        },
-        "u2net_cloth_seg": {
-            "name": "U²-Net 服装",
-            "desc": "衣物分割",
-            "file": "u2net_cloth_seg.onnx",
-            "size_mb": 170,
-            "quality": 3,
-            "large": False
-        },
-        "silueta": {
-            "name": "Silueta",
-            "desc": "轮廓优化",
-            "file": "silueta.onnx",
-            "size_mb": 40,
-            "quality": 3,
-            "large": False
-        },
-    }
-    
-    _sessions = {}
-    _lock = threading.Lock()
-    _models_status = {}
-    
-    @classmethod
-    def get_model_dir(cls) -> Path:
-        model_dir = Path(ConfigManager.get_model_dir())
-        model_dir.mkdir(parents=True, exist_ok=True)
-        return model_dir
-    
-    @classmethod
-    def get_models_config_file(cls) -> Path:
-        return ConfigManager.MODELS_CONFIG_FILE
-    
-    @classmethod
-    def load_models_config(cls):
-        """从配置文件加载模型状态"""
-        config_file = cls.get_models_config_file()
-        if config_file.exists():
-            try:
-                with open(config_file, 'r', encoding='utf-8') as f:
-                    cls._models_status = json.load(f)
-            except:
-                cls._models_status = {}
-        return cls._models_status
-    
-    @classmethod
-    def save_models_config(cls):
-        """保存模型状态到配置文件"""
-        config_file = cls.get_models_config_file()
+    def _safe_makedirs(self, path):
         try:
-            with open(config_file, 'w', encoding='utf-8') as f:
-                json.dump(cls._models_status, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            logger.error(f"保存模型配置失败: {e}")
+            os.makedirs(path, exist_ok=True)
+            return True
+        except:
+            return False
     
-    @classmethod
-    def scan_models(cls) -> dict:
-        """扫描模型目录，更新模型状态"""
-        model_dir = cls.get_model_dir()
-        cls._models_status = {}
-        found_count = 0
+    def _scan_ffmpeg(self):
+        """扫描ffmpeg"""
+        exe_targets = {"ffmpeg": ["ffmpeg.exe"], "ffprobe": ["ffprobe.exe"]}
+        search_roots = [self.tools_dir, self.base_dir, self.app_dir]
         
-        for model_id, info in cls.MODELS.items():
-            model_file = model_dir / info["file"]
-            exists = model_file.exists()
-            
-            if exists:
-                found_count += 1
-                file_size = model_file.stat().st_size // (1024 * 1024)
-                cls._models_status[model_id] = {
-                    "exists": True,
-                    "file": info["file"],
-                    "path": str(model_file),
-                    "size_mb": file_size,
-                    "scan_time": datetime.now().isoformat()
-                }
-            else:
-                cls._models_status[model_id] = {
-                    "exists": False,
-                    "file": info["file"],
-                    "path": str(model_file),
-                    "size_mb": 0,
-                    "scan_time": datetime.now().isoformat()
-                }
-        
-        # 扫描用户自定义模型
-        for onnx_file in model_dir.glob("*.onnx"):
-            is_known = False
-            for model_id, info in cls.MODELS.items():
-                if onnx_file.name == info["file"]:
-                    is_known = True
+        for key, names in exe_targets.items():
+            found_path = None
+            for root in search_roots:
+                if not os.path.exists(root):
+                    continue
+                for name in names:
+                    direct_path = os.path.join(root, name)
+                    if os.path.isfile(direct_path) and self._verify_exe_file(direct_path):
+                        found_path = direct_path
+                        break
+                if found_path:
                     break
             
-            if not is_known:
-                custom_id = onnx_file.stem
-                file_size = onnx_file.stat().st_size // (1024 * 1024)
-                cls._models_status[f"custom_{custom_id}"] = {
-                    "exists": True,
-                    "file": onnx_file.name,
-                    "path": str(onnx_file),
-                    "size_mb": file_size,
-                    "custom": True,
-                    "scan_time": datetime.now().isoformat()
-                }
-                found_count += 1
-        
-        cls.save_models_config()
-        logger.info(f"扫描完成: {found_count} 个模型")
-        return cls._models_status
-
-    @classmethod
-    def ensure_model(cls, model_id: str, parent=None) -> bool:
-        return False
-
-    @classmethod
-    def download_model(cls, model_id: str, parent=None) -> bool:
-        return False
-        sha = info.get("sha256")
-        if sha:
-            try:
-                h = hashlib.sha256()
-                with open(target, "rb") as f:
-                    for b in iter(lambda: f.read(256 * 1024), b""):
-                        h.update(b)
-                if h.hexdigest().lower() != sha.lower():
-                    try:
-                        target.unlink()
-                    except:
-                        pass
-                    QMessageBox.critical(parent, "错误", "校验失败")
-                    return False
-            except Exception as e:
-                QMessageBox.critical(parent, "错误", str(e))
+            if not found_path:
+                found_path = self._find_in_system_path(key)
+            
+            self.exes[key] = found_path if found_path else os.path.join(self.tools_dir, names[0])
+    
+    def _verify_exe_file(self, path):
+        try:
+            if not os.path.isfile(path) or os.path.getsize(path) < 10000:
                 return False
-        size_mb = target.stat().st_size // (1024 * 1024)
-        cls._models_status[model_id] = {
-            "exists": True,
-            "file": target.name,
-            "path": str(target),
-            "size_mb": size_mb,
-            "scan_time": datetime.now().isoformat()
-        }
-        cls.save_models_config()
-        logger.success(f"模型已下载: {target}")
-        return True
-    
-    @classmethod
-    def check_model_exists(cls, model_id: str) -> bool:
-        """检查模型文件是否存在"""
-        model_dir = cls.get_model_dir()
-        
-        if model_id in cls.MODELS:
-            model_file = model_dir / cls.MODELS[model_id]["file"]
-            return model_file.exists()
-        
-        if model_id.startswith("custom_"):
-            status = cls._models_status.get(model_id, {})
-            if status.get("path"):
-                return Path(status["path"]).exists()
-        
-        return False
-    
-    @classmethod
-    def get_model_status(cls, model_id: str) -> dict:
-        """获取模型状态"""
-        if model_id in cls._models_status:
-            cached = cls._models_status[model_id]
-            cached["exists"] = cls.check_model_exists(model_id)
-            return cached
-        
-        if not cls._models_status:
-            cls.scan_models()
-        
-        return cls._models_status.get(model_id, {
-            "exists": False,
-            "file": cls.MODELS.get(model_id, {}).get("file", f"{model_id}.onnx")
-        })
-    
-    @classmethod
-    def is_large_model(cls, model_id: str) -> bool:
-        """判断是否是大模型"""
-        info = cls.MODELS.get(model_id, {})
-        return info.get("large", False)
-    
-    @classmethod
-    def should_scale_down(cls, model_id: str) -> bool:
-        """判断是否需要缩小处理"""
-        if not cls.is_large_model(model_id):
+            with open(path, 'rb') as f:
+                return f.read(2) == b'MZ'
+        except:
             return False
-        
-        info = cls.MODELS.get(model_id, {})
-        model_size = info.get("size_mb", 200)
-        
-        if HardwareInfo.has_sufficient_resources(model_size):
-            return False
-        
-        return True
     
-    @classmethod
-    def load_model(cls, model_id: str):
-        """加载模型"""
-        global USE_REMBG, rembg_new_session
-        
-        if not USE_REMBG:
-            logger.error("rembg 未安装，无法加载模型")
-            return None
-        
-        with cls._lock:
-            if model_id in cls._sessions:
-                logger.info(f"模型 {model_id} 已在缓存中")
-                return cls._sessions[model_id]
-        
-        exists = cls.check_model_exists(model_id)
-        if not exists:
-            logger.warning(f"模型文件不存在，将在首次使用时自动下载")
-        
+    def _find_in_system_path(self, name):
         try:
-            logger.info(f"加载模型: {model_id}...")
-            start = time.time()
-            
-            gc.collect()
-            
-            old_out, old_err = sys.stdout, sys.stderr
-            class _LoggerStream:
-                def __init__(self, level):
-                    self.buf = ""
-                    self.level = level
-                def write(self, s):
-                    self.buf += s
-                    while "\n" in self.buf:
-                        line, self.buf = self.buf.split("\n", 1)
-                        line = line.strip()
-                        if line:
-                            logger.pipe(line, self.level)
-                def flush(self):
-                    pass
-            sys.stdout = _LoggerStream("info")
-            sys.stderr = _LoggerStream("warning")
-            try:
-                session = rembg_new_session(model_id)
-            finally:
-                sys.stdout, sys.stderr = old_out, old_err
-            
-            elapsed = time.time() - start
-            logger.success(f"模型加载成功 ({elapsed:.1f}s)")
-            
-            with cls._lock:
-                cls._sessions[model_id] = session
-            
-            cls._models_status[model_id] = cls._models_status.get(model_id, {})
-            cls._models_status[model_id]["exists"] = True
-            cls._models_status[model_id]["loaded"] = True
-            cls.save_models_config()
-            
-            return session
-            
-        except Exception as e:
-            logger.error(f"模型加载失败: {e}")
-            traceback.print_exc()
-            
-            if model_id != "u2netp":
-                logger.warning("尝试回退到 u2netp 轻量模型...")
-                return cls.load_model("u2netp")
-            
-            return None
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            result = subprocess.run(['where', name], capture_output=True, startupinfo=si, timeout=5)
+            if result.returncode == 0:
+                path = result.stdout.decode().strip().split('\n')[0].strip()
+                if os.path.isfile(path):
+                    return path
+        except:
+            pass
+        return None
     
-    @classmethod
-    def get_session(cls, model_id: str):
-        with cls._lock:
-            return cls._sessions.get(model_id)
-    
-    @classmethod
-    def clear_cache(cls):
-        with cls._lock:
-            cls._sessions.clear()
-        gc.collect()
-        logger.info("模型缓存已清除")
-
-# ==================== rembg 导入（增强错误处理）====================
-USE_REMBG = False
-rembg_remove = None
-rembg_new_session = None
-REMBG_ERROR_MSG = ""
-
-def _try_import_rembg():
-    """尝试导入 rembg，返回 (success, error_message)"""
-    global USE_REMBG, rembg_remove, rembg_new_session, REMBG_ERROR_MSG
-    
-    try:
-        # 首先检查 onnxruntime
+    def _save_config(self):
         try:
-            import onnxruntime
-        except ImportError:
-            REMBG_ERROR_MSG = "onnxruntime 未安装"
-            return False, REMBG_ERROR_MSG
-        except Exception as e:
-            REMBG_ERROR_MSG = f"onnxruntime 加载失败: {e}"
-            return False, REMBG_ERROR_MSG
-        
-        # 然后导入 rembg
-        try:
-            from rembg import remove as _remove, new_session as _new_session
-            rembg_remove = _remove
-            rembg_new_session = _new_session
-            USE_REMBG = True
-            return True, None
-        except ImportError:
-            REMBG_ERROR_MSG = "rembg 模块未安装"
-            return False, REMBG_ERROR_MSG
-        except Exception as e:
-            REMBG_ERROR_MSG = f"rembg 加载失败: {e}"
-            return False, REMBG_ERROR_MSG
-            
-    except Exception as e:
-        REMBG_ERROR_MSG = f"导入过程发生未知错误: {e}"
-        return False, REMBG_ERROR_MSG
+            config = {"base_dir": self.base_dir, "tools_dir": self.tools_dir,
+                      "exes": self.exes, "last_update": time.strftime("%Y-%m-%d %H:%M:%S")}
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+        except:
+            pass
+    
+    def get_exe(self, name):
+        return self.exes.get(name, "")
+    
+    def is_exe_available(self, name):
+        path = self.exes.get(name, "")
+        return path and os.path.isfile(path) and self._verify_exe_file(path)
+    
+    def refresh(self):
+        self._initialized = False
+        self.__init__()
+    
+    def get_info(self):
+        info = {"程序目录": self.app_dir, "工作目录": self.base_dir, "工具目录": self.tools_dir}
+        path = self.exes.get("ffmpeg", "")
+        info["ffmpeg"] = f"✓ {path}" if path and os.path.isfile(path) else f"✗ 未找到"
+        return info
 
-# 执行导入
-_import_success, _import_msg = _try_import_rembg()
-if _import_success:
-    logger.success("✓ rembg 模块加载成功")
-else:
-    logger.error(f"✗ rembg 模块不可用: {_import_msg}")
 
-# 执行硬件检测和模型扫描
-HardwareInfo.detect()
-ModelManager.scan_models()
+PM = PathManager()
 
-# ==================== 激活验证模块 ====================
+
+# ==================== 1. 授权验证 ====================
+LICENSE_FILE_NAME = "license.key"
 MAGIC_VALUE = "788990"
 
 class LicenseManager:
     @staticmethod
-    def get_license_file():
-        return ConfigManager.get_license_file()
+    def _get_license_path():
+        return os.path.join(PM.tools_dir, LICENSE_FILE_NAME)
     
     @staticmethod
     def get_machine_code():
+        raw = ""
         try:
             si = subprocess.STARTUPINFO()
             si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            def get_cmd(c):
-                try: 
-                    return subprocess.check_output(c, startupinfo=si).decode().split('\n')[1].strip()
-                except: 
-                    return ""
-            raw = f"{get_cmd('wmic cpu get processorid')}{get_cmd('wmic baseboard get serialnumber')}{get_cmd('wmic diskdrive where index=0 get serialnumber')}".replace(" ", "")
-            if len(raw) < 5: 
-                import uuid
-                raw = str(uuid.getnode())
-            hashed = hashlib.md5(raw.encode()).hexdigest().upper()
-            return f"{hashed[0:4]}-{hashed[4:8]}-{hashed[8:12]}-{hashed[12:16]}"
-        except: 
-            return "ERROR-ID"
-
+            try:
+                ps_cmd = '(Get-CimInstance Win32_Processor).ProcessorId + (Get-CimInstance Win32_BaseBoard).SerialNumber'
+                result = subprocess.check_output(['powershell', '-Command', ps_cmd],
+                    startupinfo=si, timeout=15, stderr=subprocess.DEVNULL).decode('utf-8', errors='ignore').strip()
+                if result and len(result) > 5:
+                    raw = result.replace(" ", "").replace("\n", "")
+            except:
+                pass
+            if len(raw) < 5:
+                try:
+                    result = subprocess.check_output('wmic cpu get processorid', shell=True,
+                        startupinfo=si, timeout=10, stderr=subprocess.DEVNULL).decode('gbk', errors='ignore')
+                    lines = [l.strip() for l in result.split('\n') if l.strip() and 'ProcessorId' not in l]
+                    if lines:
+                        raw = lines[0].replace(" ", "")
+                except:
+                    pass
+            if len(raw) < 5:
+                import uuid as uuid_mod
+                raw = str(uuid_mod.getnode())
+        except:
+            import uuid as uuid_mod
+            raw = str(uuid_mod.getnode())
+        h = hashlib.md5(raw.encode()).hexdigest().upper()
+        return f"{h[0:4]}-{h[4:8]}-{h[8:12]}-{h[12:16]}"
+    
     @staticmethod
     def verify_key(machine_code, input_key):
         try:
-            clean_mac = machine_code.replace("-", "").replace(" ", "")
-            today_str = date.today().strftime("%Y%m%d")
-            input_str = f"{clean_mac}{today_str}{MAGIC_VALUE}"
-            sha = hashlib.sha256(input_str.encode()).hexdigest().upper()
+            clean = machine_code.replace("-", "").replace(" ", "")
+            today = date.today().strftime("%Y%m%d")
+            sha = hashlib.sha256(f"{clean}{today}{MAGIC_VALUE}".encode()).hexdigest().upper()
             correct = "-".join([sha[i:i+5] for i in range(0, 25, 5)])
             return input_key.strip().upper() == correct
-        except: 
+        except:
             return False
-
+    
     @staticmethod
     def check_license_file():
-        license_file = LicenseManager.get_license_file()
-        if not os.path.exists(license_file): 
+        path = LicenseManager._get_license_path()
+        if not os.path.exists(path):
             return False
         try:
-            with open(license_file, "r") as f: 
+            with open(path, "r") as f:
                 saved = f.read().strip()
-            curr = hashlib.md5(LicenseManager.get_machine_code().encode()).hexdigest()
-            return saved == curr
-        except: 
+            return saved == hashlib.md5(LicenseManager.get_machine_code().encode()).hexdigest()
+        except:
             return False
-
+    
     @staticmethod
     def save_license():
-        license_file = LicenseManager.get_license_file()
-        os.makedirs(os.path.dirname(license_file), exist_ok=True)
-        with open(license_file, "w") as f:
-            f.write(hashlib.md5(LicenseManager.get_machine_code().encode()).hexdigest())
-# ==================== 第二部分：UI组件、颜色选择器、图像处理、Workers ====================
-
-# ==================== 颜色选择器组件 ====================
-class ColorPickerWidget(QWidget):
-    """带颜色选择器的输入组件"""
-    
-    # 预设常用颜色
-    PRESET_COLORS = [
-        ("#FFFFFF", "白色"),
-        ("#000000", "黑色"),
-        ("#00FF00", "绿幕"),
-        ("#0000FF", "蓝幕"),
-        ("#FF0000", "红色"),
-        ("#FFFF00", "黄色"),
-        ("#00FFFF", "青色"),
-        ("#FF00FF", "品红"),
-        ("#808080", "灰色"),
-        ("#F5F5DC", "米色"),
-    ]
-    
-    color_changed = Signal(str)
-    
-    def __init__(self, default_color: str = "#FFFFFF", parent=None):
-        super().__init__(parent)
-        self.current_color = default_color
-        self._setup_ui()
-    
-    def _setup_ui(self):
-        layout = QHBoxLayout()
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
-        
-        # 颜色预览框
-        self.color_preview = QLabel()
-        self.color_preview.setFixedSize(24, 24)
-        self.color_preview.setStyleSheet(f"""
-            QLabel {{
-                background-color: {self.current_color};
-                border: 1px solid #666;
-                border-radius: 3px;
-            }}
-        """)
-        layout.addWidget(self.color_preview)
-        
-        # 颜色代码输入框
-        self.color_edit = QLineEdit(self.current_color)
-        self.color_edit.setFixedWidth(80)
-        self.color_edit.setPlaceholderText("#RRGGBB")
-        self.color_edit.textChanged.connect(self._on_text_changed)
-        layout.addWidget(self.color_edit)
-        
-        # 选择颜色按钮
-        self.pick_btn = QPushButton("选色")
-        self.pick_btn.setFixedWidth(45)
-        self.pick_btn.setToolTip("打开颜色选择器")
-        self.pick_btn.clicked.connect(self._open_color_dialog)
-        layout.addWidget(self.pick_btn)
-        
-        # 预设颜色下拉框
-        self.preset_combo = QComboBox()
-        self.preset_combo.setFixedWidth(70)
-        self.preset_combo.addItem("预设...")
-        for color, name in self.PRESET_COLORS:
-            self.preset_combo.addItem(name, color)
-        self.preset_combo.currentIndexChanged.connect(self._on_preset_selected)
-        layout.addWidget(self.preset_combo)
-        
-        self.setLayout(layout)
-
-    def _on_text_changed(self, text: str):
-        text = text.strip()
-        if self._is_valid_color(text):
-            self.current_color = text
-            self._update_preview()
-            self.color_changed.emit(text)
-
-    def _is_valid_color(self, color: str) -> bool:
-        if not color.startswith('#'):
-            return False
-        color = color[1:]
-        if len(color) not in (3, 6):
-            return False
         try:
-            int(color, 16)
+            path = LicenseManager._get_license_path()
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write(hashlib.md5(LicenseManager.get_machine_code().encode()).hexdigest())
             return True
-        except ValueError:
+        except:
             return False
 
-    def _update_preview(self):
-        self.color_preview.setStyleSheet(f"""
-            QLabel {{
-                background-color: {self.current_color};
-                border: 1px solid #666;
-                border-radius: 3px;
-            }}
-        """)
 
-    def _open_color_dialog(self):
-        initial_color = QColor(self.current_color)
-        color = QColorDialog.getColor(initial_color, self, "选择背景颜色")
-        if color.isValid():
-            hex_color = color.name().upper()
-            self.current_color = hex_color
-            self.color_edit.setText(hex_color)
-            self._update_preview()
-            self.color_changed.emit(hex_color)
-
-    def _on_preset_selected(self, index: int):
-        if index <= 0:
-            return
-        color = self.preset_combo.itemData(index)
-        if color:
-            self.current_color = color
-            self.color_edit.setText(color)
-            self._update_preview()
-            self.color_changed.emit(color)
-        self.preset_combo.setCurrentIndex(0)
-
-    def get_color(self) -> str:
-        return self.current_color
-
-    def set_color(self, color: str):
-        if self._is_valid_color(color):
-            self.current_color = color
-            self.color_edit.setText(color)
-            self._update_preview()
-
-class SpritePreviewDialog(QDialog):
-    def __init__(self, frames, fps=12, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("精灵预览")
-        self.label = QLabel()
-        self.label.setAlignment(Qt.AlignCenter)
-        layout = QVBoxLayout()
-        layout.addWidget(self.label)
-        self.setLayout(layout)
-        self.frames = frames
-        self.idx = 0
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self._next)
-        self.timer.start(int(1000/max(1,fps)))
-        self._next()
-    def _to_pix(self, pil):
-        img = pil.convert('RGBA')
-        data = img.tobytes('raw', 'RGBA')
-        qimg = QImage(data, img.width, img.height, QImage.Format_RGBA8888)
-        return QPixmap.fromImage(qimg)
-    def _next(self):
-        if not self.frames:
-            return
-        pix = self._to_pix(self.frames[self.idx % len(self.frames)])
-        self.label.setPixmap(pix)
-        self.idx += 1
-
-class SpriteEditorDialog(QDialog):
-    def __init__(self, parent=None, source_sprite_path: str = None, frames: list = None, source_frames: list = None):
-        super().__init__(parent)
-        self.setWindowTitle("编辑精灵图")
-        self.setMinimumSize(1200, 820)
-        self.frames = []
-        self.index_map = []
-        self.scale_percent = 100
-        self.base_w, self.base_h = (128, 128)
-        main_layout = QHBoxLayout()
-        self.table = QTableWidget()
-        self.table.setSelectionMode(QAbstractItemView.MultiSelection)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
-        self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
-        self.table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
-
-        left_panel = self._build_slice_params_panel()
-        left_panel.setMinimumWidth(300)
-        main_layout.addWidget(left_panel, 0)
-
-        right_layout = QVBoxLayout()
-        right_layout.addWidget(self.table, 1)
-        bottom_ctrl = self._build_output_controls()
-        # 预览列数来源于主窗口设置，但输出列数保持编辑器自身默认值
-        right_layout.addLayout(bottom_ctrl)
-        right_widget = QWidget()
-        right_widget.setLayout(right_layout)
-        main_layout.addWidget(right_widget, 1)
-        self.setLayout(main_layout)
-        try:
-            self._on_seg_mode_changed(self.seg_mode.currentIndex())
-        except Exception:
-            pass
-        provided_frames = source_frames if source_frames is not None else frames
-        if provided_frames:
-            self.frames = provided_frames
-            try:
-                self.base_w, self.base_h = self.frames[0].size
-            except:
-                pass
-            preview_cols = None
-            try:
-                if parent is not None and hasattr(parent, 'sprite_cols'):
-                    preview_cols = max(1, int(parent.sprite_cols.value()))
-            except Exception:
-                preview_cols = None
-            if preview_cols is None:
-                preview_cols = 10
-            self._populate(preview_cols)
-            try:
-                self.display_cols = preview_cols
-                if hasattr(self, 'preview_cols_spin'):
-                    self.preview_cols_spin.setValue(preview_cols)
-                self._capture_origin_state()
-            except Exception:
-                pass
-        elif source_sprite_path:
-            self.source_img = Image.open(source_sprite_path).convert('RGBA')
-            w, h = self.source_img.size
-            # 安全默认：不自动猜测超大行列，初始为 1x1，并默认自动检测
-            guess_rows = 1
-            guess_cols = 1
-            self.seg_mode.setCurrentIndex(0)
-            if hasattr(self, 'src_rows_spin') and hasattr(self, 'src_cols_spin'):
-                self.src_rows_spin.setValue(guess_rows)
-                self.src_cols_spin.setValue(guess_cols)
-                self.src_rows_spin.valueChanged.connect(lambda _: self._update_cell_size_label())
-                self.src_cols_spin.valueChanged.connect(lambda _: self._update_cell_size_label())
-            # 不在参数变化时自动切分，改为点击“应用分割”触发
-            self.frames = [self.source_img]
-            try:
-                self.base_w, self.base_h = self.source_img.size
-            except:
-                pass
-            # 输出列数保持编辑器默认 5，不从主窗口设置同步
-            try:
-                self._update_cell_size_label()
-            except Exception:
-                pass
-            self._populate(1)
-            try:
-                self.display_cols = 1
-                if hasattr(self, 'preview_cols_spin'):
-                    self.preview_cols_spin.setValue(1)
-                self._capture_origin_state()
-            except Exception:
-                pass
-        self.col_spin.valueChanged.connect(lambda _: self._populate(getattr(self, 'display_cols', max(1, int(self.col_spin.value())))))
-        if hasattr(self, 'preview_row_gap'):
-            self.preview_row_gap.valueChanged.connect(lambda _: self._populate(getattr(self, 'display_cols', max(1, int(self.col_spin.value())))))
-        self.table.itemSelectionChanged.connect(self._update_count)
-        try:
-            self._left_preview_update_timer()
-        except Exception:
-            pass
-        self.select_cols.toggled.connect(lambda s: self.table.setSelectionBehavior(QAbstractItemView.SelectColumns if self.select_cols.isChecked() else QAbstractItemView.SelectItems))
-        self.btn_select_all.clicked.connect(self._select_all)
-        self.btn_clear.clicked.connect(self._clear_selection)
-        self.scale_slider.valueChanged.connect(self._on_scale_changed)
-        if hasattr(self, 'preview_cols_spin'):
-            self.preview_cols_spin.valueChanged.connect(lambda v: [setattr(self, 'display_cols', max(1, int(v))), self._populate(max(1, int(v)))])
-        self._update_count()
-
-    def _pil_to_pixmap(self, pil, idx):
-        img = pil.convert('RGBA')
-        data = img.tobytes('raw', 'RGBA')
-        qimg = QImage(data, img.width, img.height, QImage.Format_RGBA8888)
-        pix = QPixmap.fromImage(qimg)
-        painter = QPainter(pix)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.fillRect(0, 0, 22, 18, QBrush(QColor(0, 0, 0, 140)))
-        painter.setPen(QPen(QColor(255, 255, 255)))
-        painter.setFont(QFont("Microsoft YaHei UI", 9, QFont.Bold))
-        painter.drawText(4, 14, str(idx+1))
-        painter.end()
-        return pix
-
-    def _populate(self, cols):
-        total = len(self.frames)
-        selected_before = set(it.data(Qt.UserRole) for it in self.table.selectedItems())
-        use_grouping = hasattr(self, 'row_counts') and isinstance(getattr(self, 'row_counts'), list) and sum(getattr(self, 'row_counts')) == total and len(getattr(self, 'row_counts')) > 0
-        if use_grouping:
-            rows = len(self.row_counts)
-        else:
-            rows = math.ceil(total / max(1, cols))
-        self.table.clear()
-        self.table.setRowCount(rows)
-        self.table.setColumnCount(cols)
-        self.table.horizontalHeader().setVisible(True)
-        self.table.verticalHeader().setVisible(False)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Fixed)
-        self.table.verticalHeader().setDefaultSectionSize(0)
-        self.index_map = []
-        tw = max(16, int(self.base_w * self.scale_percent / 100))
-        th = max(16, int(self.base_h * self.scale_percent / 100))
-        self.table.setIconSize(QSize(tw, th))
-        for c in range(cols):
-            self.table.setColumnWidth(c, tw + 16)
-        if use_grouping:
-            i = 0
-            for r in range(rows):
-                cnt = max(0, int(self.row_counts[r]))
-                offset = max(0, (cols - cnt) // 2)
-                for j in range(cnt):
-                    if i >= total:
-                        break
-                    cc = offset + j
-                    item = QTableWidgetItem()
-                    item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-                    item.setData(Qt.UserRole, i)
-                    pix = self._pil_to_pixmap(self.frames[i], i).scaled(tw, th, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                    item.setIcon(QIcon(pix))
-                    self.table.setItem(r, cc, item)
-                    self.index_map.append((r, cc, i))
-                    i += 1
-        else:
-            for i in range(total):
-                r = i // cols
-                c = i % cols
-                item = QTableWidgetItem()
-                item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-                item.setData(Qt.UserRole, i)
-                pix = self._pil_to_pixmap(self.frames[i], i).scaled(tw, th, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                item.setIcon(QIcon(pix))
-                self.table.setItem(r, c, item)
-                self.index_map.append((r, c, i))
-        gap = 0
-        try:
-            gap = int(self.preview_row_gap.value()) if hasattr(self, 'preview_row_gap') else 0
-        except Exception:
-            gap = 0
-        for r in range(rows):
-            self.table.setRowHeight(r, th + 16 + max(0, gap))
-        self.table.setHorizontalHeaderLabels([str(i+1) for i in range(cols)])
-        if selected_before:
-            for r, c, idx in self.index_map:
-                if idx in selected_before:
-                    it = self.table.item(r, c)
-                    if it:
-                        it.setSelected(True)
-        self.count_label.setText(f"{len(self.table.selectedItems())}/{total}")
-
-    def _on_scale_changed(self, val):
-        self.scale_percent = int(val)
-        self.scale_label.setText(f"{self.scale_percent}%")
-        self._populate(getattr(self, 'display_cols', max(1, int(self.col_spin.value()))))
-
-    def _update_count(self):
-        items = self.table.selectedItems()
-        total = len(self.frames)
-        self.count_label.setText(f"{len(items)}/{total}")
-
-    def _select_all(self):
-        self.table.selectAll()
-
-    def _clear_selection(self):
-        self.table.clearSelection()
-        self._update_count()
-
-    def get_selected_frames(self):
-        items = self.table.selectedItems()
-        idxs = sorted([it.data(Qt.UserRole) for it in items])
-        return [self.frames[i] for i in idxs]
-
-    def get_output_cols(self):
-        return max(1, int(self.col_spin.value()))
-
-    def _build_slice_params_panel(self):
-        panel = QGroupBox("分割设置")
-        panel.setFixedWidth(280)
-        layout = QVBoxLayout()
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(4)
-        mode_group = QGroupBox("分割方式")
-        mode_layout = QVBoxLayout()
-        mode_layout.setContentsMargins(4, 4, 4, 4)
-        mode_layout.setSpacing(4)
-        mode_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        mode_group.setMaximumHeight(60)
-        self.seg_mode = QComboBox()
-        self.seg_mode.addItems(["网格 (Grid)", "固定尺寸 (Fixed Size)", "自动检测 (Auto)", "配置文件 (Atlas)"])
-        self.seg_mode.currentIndexChanged.connect(self._on_seg_mode_changed)
-        mode_layout.addWidget(self.seg_mode)
-        mode_group.setLayout(mode_layout)
-        layout.addWidget(mode_group)
-        self.params_stack = QStackedWidget()
-        self.params_stack.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        self.params_stack.addWidget(self._build_grid_params())
-        self.params_stack.addWidget(self._build_fixed_size_params())
-        self.params_stack.addWidget(self._build_auto_detect_params())
-        self.params_stack.addWidget(self._build_atlas_params())
-        layout.addWidget(self.params_stack)
-        btn_row = QHBoxLayout()
-        apply_btn = QPushButton("应用分割")
-        apply_btn.clicked.connect(self._slice_source_sprite)
-        btn_row.addWidget(apply_btn)
-        self.undo_btn = QPushButton("撤销分割")
-        self.undo_btn.setEnabled(False)
-        self.undo_btn.clicked.connect(self._undo_slice)
-        btn_row.addWidget(self.undo_btn)
-        layout.addLayout(btn_row)
-        preview_group = QGroupBox("选中帧预览")
-        pg_layout = QVBoxLayout()
-        pg_layout.setContentsMargins(4, 4, 4, 4)
-        pg_layout.setSpacing(4)
-        self.left_preview_label = QLabel()
-        self.left_preview_label.setAlignment(Qt.AlignCenter)
-        self.left_preview_label.setMinimumHeight(280)
-        pg_layout.addWidget(self.left_preview_label)
-        ctrl_row = QHBoxLayout()
-        ctrl_row.addWidget(QLabel("速度 (fps):"))
-        self.left_preview_fps = QSpinBox()
-        self.left_preview_fps.setRange(1, 60)
-        self.left_preview_fps.setValue(12)
-        self.left_preview_fps.valueChanged.connect(self._left_preview_update_timer)
-        ctrl_row.addWidget(self.left_preview_fps)
-        ctrl_row.addStretch()
-        pg_layout.addLayout(ctrl_row)
-        preview_group.setLayout(pg_layout)
-        layout.addWidget(preview_group)
-        ok_cancel = QHBoxLayout()
-        ok_btn = QPushButton("确定")
-        cancel_btn = QPushButton("取消")
-        gif_btn = QPushButton("生成透明GIF")
-        ok_btn.clicked.connect(self.accept)
-        cancel_btn.clicked.connect(self.reject)
-        ok_cancel.addStretch()
-        gif_btn.clicked.connect(self._on_generate_gif)
-        ok_cancel.addWidget(gif_btn)
-        ok_cancel.addWidget(ok_btn)
-        ok_cancel.addWidget(cancel_btn)
-        layout.addLayout(ok_cancel)
-        panel.setLayout(layout)
-        return panel
-
-    def _on_seg_mode_changed(self, idx):
-        self.params_stack.setCurrentIndex(idx)
-        try:
-            w = self.params_stack.currentWidget()
-            if w:
-                h = w.sizeHint().height()
-                self.params_stack.setMinimumHeight(h)
-                self.params_stack.setMaximumHeight(h)
-        except Exception:
-            pass
-
-    def _build_output_controls(self):
-        ctrl = QHBoxLayout()
-        ctrl.addWidget(QLabel("输出列数:"))
-        self.col_spin = QSpinBox(); self.col_spin.setRange(1, 1000); self.col_spin.setValue(5)
-        ctrl.addWidget(self.col_spin)
-        ctrl.addWidget(QLabel("预览列数:"))
-        self.preview_cols_spin = QSpinBox(); self.preview_cols_spin.setRange(1, 1000); self.preview_cols_spin.setValue(getattr(self, 'display_cols', 10))
-        ctrl.addWidget(self.preview_cols_spin)
-        self.select_cols = QCheckBox("按列选择")
-        ctrl.addWidget(self.select_cols)
-        ctrl.addWidget(QLabel("行间距:"))
-        self.preview_row_gap = QSpinBox()
-        self.preview_row_gap.setRange(0, 64)
-        self.preview_row_gap.setValue(0)
-        ctrl.addWidget(self.preview_row_gap)
-        ctrl.addWidget(QLabel("缩放:"))
-        self.scale_slider = QSlider(Qt.Horizontal)
-        self.scale_slider.setRange(10, 200)
-        self.scale_slider.setValue(self.scale_percent)
-        self.scale_slider.setTickInterval(5)
-        self.scale_slider.setSingleStep(5)
-        ctrl.addWidget(self.scale_slider)
-        self.scale_label = QLabel(f"{self.scale_percent}%")
-        ctrl.addWidget(self.scale_label)
-        self.btn_select_all = QPushButton("全选")
-        self.btn_clear = QPushButton("全不选")
-        ctrl.addWidget(self.btn_select_all)
-        ctrl.addWidget(self.btn_clear)
-        self.count_label = QLabel("0/")
-        ctrl.addWidget(self.count_label)
-        ctrl.addStretch()
-        return ctrl
-
-    def _pil_to_pixmap_raw(self, pil):
-        img = pil.convert('RGBA')
-        data = img.tobytes('raw', 'RGBA')
-        qimg = QImage(data, img.width, img.height, QImage.Format_RGBA8888)
-        return QPixmap.fromImage(qimg)
-
-    def _left_preview_update_timer(self):
-        try:
-            fps = max(1, int(self.left_preview_fps.value()))
-            if not hasattr(self, 'left_preview_timer'):
-                self.left_preview_timer = QTimer(self)
-                self.left_preview_timer.timeout.connect(self._left_preview_next)
-            self.left_preview_timer.start(int(1000/max(1,fps)))
-        except Exception:
-            pass
-
-    def _left_preview_next(self):
-        try:
-            frames = self._get_selected_or_all_frames()
-            if not frames:
-                self.left_preview_label.clear()
-                return
-            if not hasattr(self, 'left_preview_idx'):
-                self.left_preview_idx = 0
-            pix = self._pil_to_pixmap_raw(frames[self.left_preview_idx % len(frames)])
-            sw = self.left_preview_label.width() if self.left_preview_label.width() > 0 else pix.width()
-            sh = self.left_preview_label.height() if self.left_preview_label.height() > 0 else pix.height()
-            pix = pix.scaled(sw, sh, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            self.left_preview_label.setPixmap(pix)
-            self.left_preview_idx += 1
-        except Exception:
-            pass
-
-    def _get_selected_or_all_frames(self):
-        try:
-            items = self.table.selectedItems()
-            if items:
-                idxs = sorted([it.data(Qt.UserRole) for it in items])
-                return [self.frames[i] for i in idxs]
-            return list(self.frames)
-        except Exception:
-            return []
-
-    def _on_generate_gif(self):
-        try:
-            frames = self._get_selected_or_all_frames()
-            if not frames:
-                QMessageBox.warning(self, "提示", "没有可用帧")
-                return
-            fps = max(1, int(self.left_preview_fps.value())) if hasattr(self, 'left_preview_fps') else 12
-            dur = 1.0 / float(max(1, fps))
-            default_dir = os.path.dirname(self.source_sprite_path) if getattr(self, 'source_sprite_path', None) else str(Path.cwd())
-            default_name = (Path(self.source_sprite_path).stem + "_prev.gif") if getattr(self, 'source_sprite_path', None) else "preview.gif"
-            save_path, _ = QFileDialog.getSaveFileName(self, "保存透明GIF", str(Path(default_dir) / default_name), "GIF (*.gif)")
-            if not save_path:
-                return
-            imgs = []
-            for im in frames:
-                if im.mode != 'RGBA':
-                    im = im.convert('RGBA')
-                imgs.append(np.array(im))
-            imageio.mimsave(save_path, imgs, format='GIF', duration=dur, loop=0)
-            QMessageBox.information(self, "完成", f"GIF 已保存:\n{save_path}")
-        except Exception as e:
-            try:
-                QMessageBox.critical(self, "错误", str(e))
-            except:
-                pass
-    def _build_grid_params(self):
-        w = QWidget()
-        fl = QFormLayout()
-        fl.setContentsMargins(4, 2, 4, 2)
-        fl.setSpacing(2)
-        fl.setRowWrapPolicy(QFormLayout.DontWrapRows)
-        self.src_cols_spin = QSpinBox(); self.src_cols_spin.setRange(1, 100); self.src_cols_spin.setValue(1)
-        self.src_rows_spin = QSpinBox(); self.src_rows_spin.setRange(1, 100); self.src_rows_spin.setValue(1)
-        fl.addRow("列数:", self.src_cols_spin)
-        fl.addRow("行数:", self.src_rows_spin)
-        self.cell_size_label = QLabel("单帧尺寸: -- x --")
-        self.cell_size_label.setWordWrap(False)
-        fl.addRow(self.cell_size_label)
-        self.src_cols_spin.valueChanged.connect(lambda _: self._update_cell_size_label())
-        self.src_rows_spin.valueChanged.connect(lambda _: self._update_cell_size_label())
-        w.setLayout(fl)
-        return w
-    def _build_fixed_size_params(self):
-        w = QWidget()
-        fl = QFormLayout()
-        self.fix_w_spin = QSpinBox(); self.fix_w_spin.setRange(1, 4096); self.fix_w_spin.setValue(64)
-        self.fix_h_spin = QSpinBox(); self.fix_h_spin.setRange(1, 4096); self.fix_h_spin.setValue(64)
-        self.fix_pad_spin = QSpinBox(); self.fix_pad_spin.setRange(0, 256); self.fix_pad_spin.setValue(0)
-        self.fix_margin_spin = QSpinBox(); self.fix_margin_spin.setRange(0, 256); self.fix_margin_spin.setValue(0)
-        fl.addRow("帧宽度:", self.fix_w_spin)
-        fl.addRow("帧高度:", self.fix_h_spin)
-        fl.addRow("帧间距:", self.fix_pad_spin)
-        fl.addRow("边缘留白:", self.fix_margin_spin)
-        w.setLayout(fl)
-        return w
-    def _build_auto_detect_params(self):
-        w = QWidget()
-        fl = QFormLayout()
-        self.alpha_thr_spin = QSpinBox(); self.alpha_thr_spin.setRange(0, 255); self.alpha_thr_spin.setValue(10)
-        self.min_size_spin = QSpinBox(); self.min_size_spin.setRange(1, 100000); self.min_size_spin.setValue(64)
-        fl.addRow("透明度阈值:", self.alpha_thr_spin)
-        fl.addRow("最小面积:", self.min_size_spin)
-        hint = QLabel("自动检测连通的不透明区域")
-        hint.setStyleSheet("color: #666; font-size: 9pt;")
-        hint.setWordWrap(True)
-        fl.addRow(hint)
-        w.setLayout(fl)
-        return w
-    def _build_atlas_params(self):
-        w = QWidget()
-        vl = QVBoxLayout()
-        self.atlas_edit = QLineEdit(); self.atlas_edit.setPlaceholderText("选择 JSON 配置文件...")
-        vl.addWidget(self.atlas_edit)
-        self.atlas_btn = QPushButton("浏览...")
-        self.atlas_btn.clicked.connect(self._select_atlas_file)
-        vl.addWidget(self.atlas_btn)
-        hint = QLabel("支持 TexturePacker 导出的 JSON 格式")
-        hint.setStyleSheet("color: #666; font-size: 9pt;")
-        hint.setWordWrap(True)
-        vl.addWidget(hint)
-        vl.addStretch()
-        w.setLayout(vl)
-        return w
-    def _update_cell_size_label(self):
-        try:
-            if hasattr(self, 'source_img'):
-                w, h = self.source_img.size
-                cols = max(1, int(self.src_cols_spin.value())) if hasattr(self, 'src_cols_spin') else 1
-                rows = max(1, int(self.src_rows_spin.value())) if hasattr(self, 'src_rows_spin') else 1
-                cw0 = w // max(1, cols)
-                ch0 = h // max(1, rows)
-                rem_w = w % max(1, cols)
-                rem_h = h % max(1, rows)
-                if rem_w == 0 and rem_h == 0:
-                    self.cell_size_label.setStyleSheet("")
-                    self.cell_size_label.setText(f"单帧尺寸: {cw0} x {ch0}")
-                else:
-                    self.cell_size_label.setStyleSheet("color:#666;")
-                    self.cell_size_label.setText(f"单帧尺寸约: {cw0}~{cw0+1} x {ch0}~{ch0+1}")
-            else:
-                self.cell_size_label.setText("单帧尺寸: -- x --")
-        except Exception:
-            pass
-    def _select_atlas_file(self):
-        try:
-            p, _ = QFileDialog.getOpenFileName(self, "选择配置文件", "", "JSON (*.json)")
-            if p:
-                self.atlas_edit.setText(p)
-                self._slice_source_sprite()
-        except Exception:
-            pass
-    def _slice_source_sprite(self):
-        try:
-            if not hasattr(self, 'source_img'):
-                return
-            text = self.seg_mode.currentText() if hasattr(self, 'seg_mode') else "网格 (Grid)"
-            w, h = self.source_img.size
-            self.frames = []
-            if text.startswith("网格"):
-                rows = max(1, int(self.src_rows_spin.value())) if self.src_rows_spin else 1
-                cols = max(1, int(self.src_cols_spin.value())) if self.src_cols_spin else 1
-                rows = min(rows, 100)
-                cols = min(cols, 100)
-                def make_cuts(total_size, parts):
-                    base = total_size // parts
-                    rem = total_size % parts
-                    widths = [base] * parts
-                    if rem > 0:
-                        order = []
-                        if parts % 2 == 1:
-                            mid = parts // 2
-                            order = [mid]
-                            k = 1
-                            while len(order) < parts:
-                                if mid - k >= 0:
-                                    order.append(mid - k)
-                                if mid + k < parts:
-                                    order.append(mid + k)
-                                k += 1
-                        else:
-                            lm = parts // 2 - 1
-                            rm = parts // 2
-                            order = [lm, rm]
-                            k = 1
-                            while len(order) < parts:
-                                if lm - k >= 0:
-                                    order.append(lm - k)
-                                if rm + k < parts:
-                                    order.append(rm + k)
-                                k += 1
-                        for i in range(rem):
-                            widths[order[i]] += 1
-                    cuts = [0]
-                    acc = 0
-                    for wi in widths:
-                        acc += wi
-                        cuts.append(acc)
-                    return cuts
-                xcuts = make_cuts(w, cols)
-                ycuts = make_cuts(h, rows)
-                total = rows * cols
-                for idx in range(total):
-                    c = idx % cols
-                    r = idx // cols
-                    box = (xcuts[c], ycuts[r], xcuts[c+1], ycuts[r+1])
-                    self.frames.append(self.source_img.crop(box))
-                self.display_cols = cols
-                self.row_counts = [cols] * rows
-                if hasattr(self, 'undo_btn'):
-                    self.undo_btn.setEnabled(True)
-                if hasattr(self, 'preview_cols_spin'):
-                    self.preview_cols_spin.setValue(self.display_cols)
-            elif text.startswith("固定尺寸"):
-                mw = max(0, int(self.fix_margin_spin.value()))
-                mh = mw
-                pw = max(0, int(self.fix_pad_spin.value()))
-                fw = max(1, int(self.fix_w_spin.value()))
-                fh = max(1, int(self.fix_h_spin.value()))
-                x_start = mw; x_end = w - mw
-                y_start = mh; y_end = h - mh
-                avail_w = max(0, x_end - x_start)
-                avail_h = max(0, y_end - y_start)
-                cols = max(1, (avail_w + pw) // (fw + pw))
-                rows = max(1, (avail_h + pw) // (fh + pw))
-                extra_w = avail_w - (cols * fw + max(0, cols-1) * pw)
-                extra_h = avail_h - (rows * fh + max(0, rows-1) * pw)
-                def make_cuts_fixed(avail, parts, size, gap, extra):
-                    if parts <= 0:
-                        return [0]
-                    gaps_count = max(0, parts-1)
-                    gaps = [gap] * gaps_count
-                    if extra > 0 and gaps_count > 0:
-                        order = []
-                        if parts % 2 == 1:
-                            mid = parts // 2
-                            k = 1
-                            # 将额外像素优先分配到中间相邻的间隙：mid-1 与 mid
-                            if mid-1 >= 0:
-                                order.append(mid-1)
-                            if mid < gaps_count:
-                                order.append(mid)
-                            while len(order) < gaps_count:
-                                if mid-1-k >= 0:
-                                    order.append(mid-1-k)
-                                if mid+k < gaps_count:
-                                    order.append(mid+k)
-                                k += 1
-                        else:
-                            lm = parts // 2 - 1
-                            rm = parts // 2 - 0
-                            order = [lm, rm]
-                            k = 1
-                            while len(order) < gaps_count:
-                                if lm- k >= 0:
-                                    order.append(lm- k)
-                                if rm+ k < gaps_count:
-                                    order.append(rm+ k)
-                                k += 1
-                        for i in range(extra):
-                            gaps[order[i % gaps_count]] += 1
-                    cuts = [0]
-                    acc = 0
-                    for i in range(parts):
-                        acc += size
-                        cuts.append(acc)
-                        if i < gaps_count:
-                            acc += gaps[i]
-                    return cuts
-                xcuts_rel = make_cuts_fixed(avail_w, cols, fw, pw, max(0, extra_w))
-                ycuts_rel = make_cuts_fixed(avail_h, rows, fh, pw, max(0, extra_h))
-                xcuts = [x_start + v for v in xcuts_rel]
-                ycuts = [y_start + v for v in ycuts_rel]
-                for r in range(rows):
-                    for c in range(cols):
-                        box = (xcuts[c], ycuts[r], xcuts[c+1], ycuts[r+1])
-                        self.frames.append(self.source_img.crop(box))
-                self.display_cols = max(1, cols)
-                self.row_counts = [cols] * rows
-                if hasattr(self, 'undo_btn'):
-                    self.undo_btn.setEnabled(True)
-                if hasattr(self, 'preview_cols_spin'):
-                    self.preview_cols_spin.setValue(self.display_cols)
-            else:
-                if text.startswith("自动检测"):
-                    thr = max(0, min(255, int(self.alpha_thr_spin.value())))
-                    min_area = max(1, int(self.min_size_spin.value()))
-                    px = self.source_img.load()
-                    visited = [[False]*w for _ in range(h)]
-                    dirs = [(1,0),(-1,0),(0,1),(0,-1),(1,1),(-1,1),(1,-1),(-1,-1)]
-                    boxes = []
-                    for yy in range(h):
-                        for xx in range(w):
-                            if visited[yy][xx]:
-                                continue
-                            if px[xx, yy][3] <= thr:
-                                visited[yy][xx] = True
-                                continue
-                            stack = [(xx, yy)]
-                            minx = xx; miny = yy; maxx = xx; maxy = yy; area = 0
-                            while stack:
-                                x0, y0 = stack.pop()
-                                if x0 < 0 or x0 >= w or y0 < 0 or y0 >= h:
-                                    continue
-                                if visited[y0][x0]:
-                                    continue
-                                visited[y0][x0] = True
-                                if px[x0, y0][3] <= thr:
-                                    continue
-                                area += 1
-                                if x0 < minx: minx = x0
-                                if x0 > maxx: maxx = x0
-                                if y0 < miny: miny = y0
-                                if y0 > maxy: maxy = y0
-                                for dx, dy in dirs:
-                                    nx = x0 + dx; ny = y0 + dy
-                                    if 0 <= nx < w and 0 <= ny < h and not visited[ny][nx]:
-                                        stack.append((nx, ny))
-                            if area >= min_area:
-                                boxes.append((minx, miny, maxx+1, maxy+1))
-                    boxes.sort(key=lambda b: (b[1], b[0]))
-                    if boxes:
-                        avg_h = int(sum(b[3]-b[1] for b in boxes) / max(1, len(boxes)))
-                        thresh = max(8, avg_h // 2)
-                    else:
-                        thresh = 0
-                    groups = []
-                    current = []
-                    last_y = None
-                    for b in boxes:
-                        y0 = b[1]
-                        if last_y is None or abs(y0 - last_y) <= thresh:
-                            current.append(b)
-                        else:
-                            groups.append(current)
-                            current = [b]
-                        last_y = y0
-                    if current:
-                        groups.append(current)
-                    self.frames = []
-                    for g in groups:
-                        for b in g:
-                            self.frames.append(self.source_img.crop(b))
-                    self.display_cols = max(len(g) for g in groups) if groups else max(1, int(self.col_spin.value()))
-                    self.row_counts = [len(g) for g in groups]
-                    if hasattr(self, 'undo_btn'):
-                        self.undo_btn.setEnabled(True)
-                    if hasattr(self, 'preview_cols_spin'):
-                        self.preview_cols_spin.setValue(self.display_cols)
-                else:
-                    p = self.atlas_edit.text() if hasattr(self, 'atlas_edit') else ''
-                    if p and os.path.exists(p):
-                        try:
-                            with open(p, 'r', encoding='utf-8') as f:
-                                data = json.load(f)
-                            infos = []
-                            if isinstance(data.get('frames'), dict):
-                                for name, fr in data['frames'].items():
-                                    if 'frame' in fr:
-                                        x = int(fr['frame']['x']); y = int(fr['frame']['y']);
-                                        fw = int(fr['frame']['w']); fh = int(fr['frame']['h'])
-                                        rot = bool(fr.get('rotated', False))
-                                    else:
-                                        x = int(fr.get('x', 0)); y = int(fr.get('y', 0));
-                                        fw = int(fr.get('w', fr.get('width', 0))); fh = int(fr.get('h', fr.get('height', 0)))
-                                        rot = bool(fr.get('rotated', False))
-                                    infos.append((x, y, fw, fh, rot))
-                            elif isinstance(data.get('frames'), list):
-                                for fr in data['frames']:
-                                    frame_obj = fr.get('frame', {})
-                                    x = int(frame_obj.get('x', fr.get('x', 0)))
-                                    y = int(frame_obj.get('y', fr.get('y', 0)))
-                                    fw = int(frame_obj.get('w', fr.get('w', fr.get('width', 0))))
-                                    fh = int(frame_obj.get('h', fr.get('h', fr.get('height', 0))))
-                                    rot = bool(fr.get('rotated', False))
-                                    infos.append((x, y, fw, fh, rot))
-                            infos.sort(key=lambda t: (t[1], t[0]))
-                            frames = []
-                            for x, y, fw, fh, rot in infos:
-                                crop = self.source_img.crop((x, y, x+fw, y+fh))
-                                if rot:
-                                    crop = crop.rotate(-90, expand=True)
-                                frames.append(crop)
-                            self.frames = frames
-                            if infos:
-                                avg_h = int(sum(hh for _,_,_,hh,_ in infos) / max(1, len(infos)))
-                                thresh = max(8, avg_h // 2)
-                                groups = []
-                                current = []
-                                last_y = None
-                                for x,y,fw,fh,rot in infos:
-                                    if last_y is None or abs(y - last_y) <= thresh:
-                                        current.append((x,y,fw,fh,rot))
-                                    else:
-                                        groups.append(current)
-                                        current = [(x,y,fw,fh,rot)]
-                                    last_y = y
-                                if current:
-                                    groups.append(current)
-                                self.display_cols = max(len(g) for g in groups) if groups else max(1, int(self.col_spin.value()))
-                                self.row_counts = [len(g) for g in groups]
-                                if hasattr(self, 'undo_btn'):
-                                    self.undo_btn.setEnabled(True)
-                                if hasattr(self, 'preview_cols_spin'):
-                                    self.preview_cols_spin.setValue(self.display_cols)
-                        except Exception:
-                            pass
-            try:
-                self.base_w, self.base_h = self.frames[0].size
-            except:
-                pass
-            self._populate(getattr(self, 'display_cols', max(1, int(self.col_spin.value()))))
-        except Exception:
-            pass
-
-    def _capture_origin_state(self):
-        try:
-            self._origin_state = {
-                'frames': [self.source_img] if hasattr(self, 'source_img') else (list(self.frames) if hasattr(self, 'frames') else []),
-                'display_cols': 1,
-                'row_counts': [1],
-                'base_w': getattr(self, 'base_w', None),
-                'base_h': getattr(self, 'base_h', None)
-            }
-            if hasattr(self, 'undo_btn'):
-                self.undo_btn.setEnabled(False)
-        except Exception:
-            pass
-
-    def _undo_slice(self):
-        try:
-            if hasattr(self, '_origin_state'):
-                self.frames = list(self._origin_state.get('frames', []))
-                self.display_cols = self._origin_state.get('display_cols', 1)
-                self.row_counts = self._origin_state.get('row_counts', [1])
-                self.base_w = self._origin_state.get('base_w', self.base_w)
-                self.base_h = self._origin_state.get('base_h', self.base_h)
-                self._populate(getattr(self, 'display_cols', 1))
-                if hasattr(self, 'undo_btn'):
-                    self.undo_btn.setEnabled(False)
-        except Exception:
-            pass
-
-# ==================== 自定义UI组件 ====================
-class FileDropLineEdit(QLineEdit):
-    def __init__(self, parent=None, placeholder="可以直接拖入文件..."):
-        super().__init__(parent)
-        self.setAcceptDrops(True)
-        self.setPlaceholderText(placeholder)
+# ==================== 2. 稳定下载器 (仅FFmpeg) ====================
+class RobustDownloader:
+    MIRRORS = {
+        "ffmpeg": [
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
+            "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+        ],
+    }
     
-    def dragEnterEvent(self, e):
-        if e.mimeData().hasUrls():
-            e.accept()
-        else:
-            e.ignore()
-
-    def dropEvent(self, e):
+    DESCRIPTIONS = {"ffmpeg": "FFmpeg (音视频处理)"}
+    
+    def __init__(self, log_func=print):
+        self.log = log_func
+        self._create_ssl_context()
+    
+    def _create_ssl_context(self):
         try:
-            path = e.mimeData().urls()[0].toLocalFile()
-            self.setText(path)
-            self.editingFinished.emit()
+            self.ssl_context = ssl.create_default_context()
+            self.ssl_context.check_hostname = False
+            self.ssl_context.verify_mode = ssl.CERT_NONE
         except:
-            pass
-
-class LogWidget(QPlainTextEdit):
-    """系统日志显示组件"""
+            self.ssl_context = None
     
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setReadOnly(True)
-        self.setMaximumBlockCount(1000)
-        self.setFont(QFont("Consolas", 9))
-        self.setStyleSheet("""
-            QPlainTextEdit {
-                background-color: #1e1e1e;
-                color: #d4d4d4;
-                border: 1px solid #3c3c3c;
-                border-radius: 4px;
-            }
-        """)
-        logger.log_signal.connect(self.append_log)
-    
-    def append_log(self, message: str, level: str):
-        colors = {
-            "info": "#d4d4d4",
-            "warning": "#dcdcaa",
-            "error": "#f14c4c",
-            "success": "#4ec9b0"
-        }
-        color = colors.get(level, "#d4d4d4")
-        cursor = self.textCursor()
-        cursor.movePosition(QTextCursor.End)
-        self.setTextCursor(cursor)
-        self.appendHtml(f'<span style="color: {color};">{message}</span>')
-        self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
-
-class ModelSelector(QComboBox):
-    """模型选择器：带状态指示"""
-    
-    model_changed = Signal(str, dict)
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setMinimumWidth(280)
-        self.refresh_models()
-        self.currentIndexChanged.connect(self._on_selection_changed)
-    
-    def refresh_models(self):
-        """刷新模型列表"""
-        blocker = QSignalBlocker(self)
-        self.clear()
-        ModelManager.scan_models()
-        for model_id, info in ModelManager.MODELS.items():
-            exists = ModelManager.check_model_exists(model_id)
-            loaded = model_id in ModelManager._sessions
-            status_icon = "★" if loaded else ("✓" if exists else "○")
-            large_mark = "🔴" if info.get("large") else ""
-            quality_stars = "★" * info.get("quality", 3)
-            display_text = f"{status_icon} {large_mark}{info['name']} [{quality_stars}]"
-            self.addItem(display_text, model_id)
-        for model_id, status in ModelManager._models_status.items():
-            if status.get("custom"):
-                display_text = f"✓ [自定义] {status['file']}"
-                self.addItem(display_text, model_id)
-        default_model = ConfigManager.get("default_model", "isnet-general-use")
-        for i in range(self.count()):
-            if self.itemData(i) == default_model:
-                self.setCurrentIndex(i)
-                break
-    
-    def _on_selection_changed(self, index):
-        # 安全检查：如果 loader 存在但已停止，强制清除
-        if getattr(self, '_loader', None) and not self._loader.isRunning():
-            self._loader = None
-
-        model_id = self.currentData()
-        if model_id:
-            exists = ModelManager.check_model_exists(model_id)
-            info = ModelManager.MODELS.get(model_id, {})
-            
-            status = {
-                "exists": exists,
-                "info": info,
-                "large": info.get("large", False)
-            }
-            self.model_changed.emit(model_id, status)
-            
-            if exists:
-                logger.info(f"已选择模型: {info.get('name', model_id)}")
-            else:
-                if getattr(self, '_loader', None) and self._loader.isRunning():
-                    logger.info("正在下载/加载模型，请稍候...")
-                    # 恢复之前的选择，或者保持当前显示但状态为下载中
-                    # 这里为了简单，我们暂不自动回退，因为用户可能就是想下载
-                    return
-                logger.info("模型缺失，开始自动下载并加载...")
-                self.setEnabled(False)
-                self._loader = ModelLoadWorker(model_id)
-                def _on_done(s, mid):
-                    logger.success("模型下载并加载完成")
-                    self.setEnabled(True)
-                    self._loader = None # 清除 loader 引用
-                    # 只更新状态，不刷新列表，避免触发递归
-                    ModelManager.scan_models()
-                    # 使用 blockSignals 阻止信号触发
-                    self.blockSignals(True)
-                    current_idx = self.currentIndex()
-                    self.refresh_models()
-                    self.setCurrentIndex(current_idx)
-                    self.blockSignals(False)
-                def _on_err(e):
-                    logger.error(f"模型加载失败: {e}")
-                    self.setEnabled(True)
-                    self._loader = None # 清除 loader 引用，允许后续操作
-                    # 可以在这里重置选择到默认模型，或者保持当前选择但标记为无效
-                self._loader.finished.connect(_on_done)
-                self._loader.error.connect(_on_err)
-                self._loader.start()
-            
-            if info.get("large"):
-                if HardwareInfo.has_sufficient_resources(info.get("size_mb", 900)):
-                    logger.info("资源充足，将使用原始分辨率处理")
-                else:
-                    logger.info("大模型将使用缩放处理以节省内存")
-    
-    def get_current_model(self) -> str:
-        return self.currentData() or "isnet-general-use"
-
-# ==================== 激活对话框 ====================
-class ActivationDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("软件激活验证")
-        self.setFixedSize(500, 480) # 宽减100(600->500), 高减50(530->480)
-        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
-        
-        self.activated = False
-        self.trial_mode = False
-        self.machine_code = LicenseManager.get_machine_code()
-        
-        main_layout = QVBoxLayout()
-        main_layout.setSpacing(20)
-        main_layout.setContentsMargins(30, 30, 30, 30)
-        
-        title = QLabel("别快视频精灵图 v7.6 极速专业版")
-        title.setFont(QFont("Microsoft YaHei UI", 18, QFont.Bold))
-        title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet("color: #2c3e50;")
-        main_layout.addWidget(title)
-
-        subtitle = QLabel("请完成激活以使用完整功能")
-        subtitle.setAlignment(Qt.AlignCenter)
-        subtitle.setStyleSheet("color: #7f8c8d; font-size: 11pt;")
-        main_layout.addWidget(subtitle)
-        
-        info_group = QGroupBox("第一步：获取机器码")
-        info_layout = QVBoxLayout()
-        code_layout = QHBoxLayout()
-        self.mac_edit = QLineEdit()
-        self.mac_edit.setText(self.machine_code)
-        self.mac_edit.setReadOnly(True)
-        self.mac_edit.setAlignment(Qt.AlignCenter)
-        self.mac_edit.setFont(QFont("Consolas", 12, QFont.Bold))
-        self.mac_edit.setFixedHeight(40)
-        
-        copy_btn = QPushButton("复制")
-        copy_btn.setFixedSize(77, 40) # 宽减3(80->77)
-        copy_btn.clicked.connect(self.copy_machine_code)
-        
-        code_layout.addWidget(self.mac_edit)
-        code_layout.addWidget(copy_btn)
-        info_layout.addLayout(code_layout)
-        info_group.setLayout(info_layout)
-        main_layout.addWidget(info_group)
-        
-        input_group = QGroupBox("第二步：输入激活密钥")
-        input_layout = QVBoxLayout()
-        self.key_edit = QLineEdit()
-        self.key_edit.setAlignment(Qt.AlignCenter)
-        self.key_edit.setFont(QFont("Consolas", 12))
-        self.key_edit.setPlaceholderText("在此处粘贴激活密钥")
-        self.key_edit.setFixedHeight(45)
-        input_layout.addWidget(self.key_edit)
-        input_group.setLayout(input_layout)
-        main_layout.addWidget(input_group)
-        
-        btn_layout = QHBoxLayout()
-        activate_btn = QPushButton("立即激活")
-        activate_btn.setFixedHeight(50)
-        activate_btn.clicked.connect(self.activate)
-        
-        trial_btn = QPushButton("试用 (15分钟)")
-        trial_btn.setFixedHeight(50)
-        trial_btn.clicked.connect(self.start_trial)
-        
-        # 调整边距以间接减少按钮宽度，或直接设置
-        # 由于使用了 layout addWidget(..., stretch)，按钮宽度是自适应的。
-        # 用户要求"窗口中的控件和按钮的宽都减小三"。
-        # 窗口变窄了100，内部控件如果随布局缩放，自然会变窄。
-        # 如果有固定宽度的控件（如 copy_btn），需要手动减小。
-        # 其他自适应控件会随窗口变窄而变窄，无需额外操作。
-        
-        btn_layout.addWidget(trial_btn, 1)
-        btn_layout.addWidget(activate_btn, 2)
-        main_layout.addLayout(btn_layout)
-        
-        contact = QLabel("联系开发者获取密钥: u788990@163.com")
-        contact.setAlignment(Qt.AlignCenter)
-        contact.setStyleSheet("color: #95a5a6; font-size: 9pt;")
-        main_layout.addWidget(contact)
-        
-        self.setLayout(main_layout)
-
-    def copy_machine_code(self):
-        QApplication.clipboard().setText(self.machine_code)
-        QMessageBox.information(self, "复制成功", "机器码已复制到剪贴板！")
-    
-    def activate(self):
-        key = self.key_edit.text().strip()
-        if not key:
-            QMessageBox.warning(self, "提示", "请输入激活密钥！")
-            return
-        if LicenseManager.verify_key(self.machine_code, key):
-            LicenseManager.save_license()
-            self.activated = True
-            QMessageBox.information(self, "激活成功", "软件已永久激活！")
-            self.accept()
-        else:
-            QMessageBox.critical(self, "激活失败", "激活密钥无效！")
-    
-    def start_trial(self):
-        reply = QMessageBox.question(self, "确认试用", "每次启动仅限使用 15 分钟，确定要继续吗？", QMessageBox.Yes | QMessageBox.No)
-        if reply == QMessageBox.Yes:
-            self.trial_mode = True
-            self.accept()
-
-# ==================== 依赖检测对话框 ====================
-class DependencyDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("依赖检测")
-        self.setFixedSize(600, 500)
-        
-        layout = QVBoxLayout()
-        
-        title = QLabel("依赖库检测结果")
-        title.setFont(QFont("Microsoft YaHei UI", 14, QFont.Bold))
-        layout.addWidget(title)
-        
-        list_widget = QListWidget()
-        list_widget.setFont(QFont("Consolas", 10))
-        
-        for module, (status, desc) in DependencyChecker.results.items():
-            icon = "✓" if status == "ok" else "✗"
-            color = "green" if status == "ok" else "red"
-            item = QListWidgetItem(f"{icon} {module}: {desc}")
-            item.setForeground(QColor(color))
-            list_widget.addItem(item)
-        
-        layout.addWidget(list_widget)
-        
-        if DependencyChecker.missing_required or DependencyChecker.missing_optional:
-            cmd_group = QGroupBox("安装命令")
-            cmd_layout = QVBoxLayout()
-            
-            full_cmd_edit = QLineEdit(DependencyChecker.get_full_install_command())
-            full_cmd_edit.setReadOnly(True)
-            cmd_layout.addWidget(full_cmd_edit)
-            
-            copy_btn = QPushButton("复制安装命令")
-            copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(DependencyChecker.get_full_install_command()))
-            cmd_layout.addWidget(copy_btn)
-            
-            cmd_group.setLayout(cmd_layout)
-            layout.addWidget(cmd_group)
-        
-        close_btn = QPushButton("关闭")
-        close_btn.clicked.connect(self.accept)
-        layout.addWidget(close_btn)
-        
-        self.setLayout(layout)
-
-# ==================== 核心图像处理函数 ====================
-def play_completion_sound():
-    if HAS_WINSOUND:
-        try: 
-            winsound.MessageBeep(winsound.MB_OK)
-        except: 
-            pass
-
-def smart_resize_for_model(pil_img: Image.Image, model_id: str) -> tuple:
-    """智能调整图片大小"""
-    original_size = pil_img.size
-    
-    if not ModelManager.should_scale_down(model_id):
-        return pil_img, original_size, False
-    
-    info = ModelManager.MODELS.get(model_id, {})
-    
-    available_mb = HardwareInfo.available_memory_mb
-    if available_mb < 2048:
-        max_res = 512
-    elif available_mb < 4096:
-        max_res = 768
-    else:
-        max_res = 1024
-    
-    w, h = original_size
-    if max(w, h) <= max_res:
-        return pil_img, original_size, False
-    
-    scale = max_res / max(w, h)
-    new_w = int(w * scale) // 2 * 2
-    new_h = int(h * scale) // 2 * 2
-    
-    logger.info(f"内存优化缩放: {original_size} -> ({new_w}, {new_h})")
-    resized = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-    return resized, original_size, True
-
-def remove_bg_with_session_smart(pil_img: Image.Image, session, model_id: str) -> Image.Image:
-    """智能背景移除"""
-    if not USE_REMBG or not rembg_remove or not session:
-        return pil_img.convert("RGBA")
-    
-    original_size = pil_img.size
-    
-    try:
-        resized_img, orig_size, was_resized = smart_resize_for_model(pil_img, model_id)
-        result = rembg_remove(resized_img, session=session)
-        
-        if was_resized and result.mode == 'RGBA':
-            result = result.resize(orig_size, Image.Resampling.LANCZOS)
-            original_rgba = pil_img.convert('RGBA')
-            r, g, b, _ = original_rgba.split()
-            _, _, _, a = result.split()
-            result = Image.merge('RGBA', (r, g, b, a))
-        
-        return result
-        
-    except MemoryError:
-        logger.error("内存不足，尝试强制缩放...")
-        gc.collect()
-        
-        w, h = original_size
-        scale = 512 / max(w, h)
-        small_size = (int(w * scale) // 2 * 2, int(h * scale) // 2 * 2)
-        small_img = pil_img.resize(small_size, Image.Resampling.LANCZOS)
-        
-        try:
-            result = rembg_remove(small_img, session=session)
-            result = result.resize(original_size, Image.Resampling.LANCZOS)
-            original_rgba = pil_img.convert('RGBA')
-            r, g, b, _ = original_rgba.split()
-            _, _, _, a = result.split()
-            return Image.merge('RGBA', (r, g, b, a))
-        except Exception as e:
-            logger.error(f"处理失败: {e}")
-            return pil_img.convert("RGBA")
-    
-    except Exception as e:
-        logger.error(f"背景移除失败: {e}")
-        return pil_img.convert("RGBA")
-
-def remove_bg_with_session(pil_img, session):
-    """兼容旧接口"""
-    if USE_REMBG and rembg_remove and session:
-        try:
-            return rembg_remove(pil_img, session=session)
-        except Exception as e:
-            logger.error(f"背景移除失败: {e}")
-            return pil_img.convert("RGBA")
-    return pil_img.convert("RGBA")
-
-def cleanup_edge_pixels(pil_img, feather: int = 1, blur: int = 1, gamma: float = 1.2):
-    """
-    边缘清理 - 增强版 v2
-    1. 预清理：清除低透明度的幽灵噪点
-    2. 形态学优化：平滑边缘毛刺
-    3. 智能羽化：保持主体轮廓
-    """
-    if not HAS_CV2 or not HAS_NUMPY:
-        return pil_img
-        
-    if pil_img.mode != 'RGBA':
-        pil_img = pil_img.convert('RGBA')
-    
-    img_array = np.array(pil_img)
-    # 分离通道
-    b, g, r, a = cv2.split(img_array)
-    
-    # --- 步骤1: 预处理 Alpha 通道 ---
-    # 强制截断低透明度噪点 (去除半透明的残留背景)
-    # 将 Alpha < 20 的像素直接置 0，大于 20 的保留
-    _, hard_alpha = cv2.threshold(a, 20, 255, cv2.THRESH_TOZERO)
-    
-    # --- 步骤2: 形态学处理 (去除毛刺) ---
-    # 使用开运算 (先腐蚀后膨胀) 去除边缘细小的噪点，而不显著缩小物体
-    if feather > 0:
-        kernel_size = 3
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-        hard_alpha = cv2.morphologyEx(hard_alpha, cv2.MORPH_OPEN, kernel, iterations=1)
-        if feather > 1:
-            erode_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-            hard_alpha = cv2.erode(hard_alpha, erode_kernel, iterations=feather - 1)
-    
-    # --- 步骤3: 边缘羽化 (高斯模糊 + Gamma) ---
-    if blur > 0:
-        alpha_f = hard_alpha.astype(np.float32) / 255.0
-        k_blur = blur * 2 + 1
-        alpha_f = cv2.GaussianBlur(alpha_f, (k_blur, k_blur), 0)
-        if gamma != 1.0:
-            alpha_f = np.power(alpha_f, gamma)
-        hard_alpha = np.clip(alpha_f * 255, 0, 255).astype(np.uint8)
-
-    img_array = cv2.merge((b, g, r, hard_alpha))
-    
-    return Image.fromarray(img_array, mode='RGBA')
-
-def remove_isolated_colors(pil_img, min_area: int, remove_internal: bool = True, internal_max_area: int = 100):
-    """
-    移除孤立色块 - 智能连通域版 v2
-    1. 使用连通组件分析代替轮廓查找，更精准
-    2. 智能保护：始终保留面积最大的色块（主体），防止误删
-    """
-    if not HAS_CV2 or not HAS_NUMPY:
-        return pil_img
-        
-    if min_area <= 0 and not remove_internal:
-        return pil_img
-        
-    if pil_img.mode != 'RGBA':
-        pil_img = pil_img.convert('RGBA')
-        
-    img_array = np.array(pil_img)
-    alpha = img_array[:, :, 3].copy()
-    
-    _, binary = cv2.threshold(alpha, 20, 255, cv2.THRESH_BINARY)
-    
-    has_change = False
-    
-    if min_area > 0:
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
-        if num_labels > 1:
-            areas = stats[1:, cv2.CC_STAT_AREA]
-            if len(areas) > 0:
-                max_area_idx = np.argmax(areas) + 1
-                new_alpha = np.zeros_like(alpha)
-                for i in range(1, num_labels):
-                    area = stats[i, cv2.CC_STAT_AREA]
-                    if i == max_area_idx or area >= min_area:
-                        component_mask = (labels == i).astype(np.uint8) * 255
-                        new_alpha = cv2.bitwise_or(new_alpha, cv2.bitwise_and(alpha, alpha, mask=component_mask))
-                    else:
-                        has_change = True
-                alpha = new_alpha
-                _, binary = cv2.threshold(alpha, 20, 255, cv2.THRESH_BINARY)
-
-    if remove_internal and internal_max_area > 0:
-        kernel_size = max(3, int(math.sqrt(internal_max_area)))
-        if kernel_size % 2 == 0:
-            kernel_size += 1
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-        closed_mask = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-        holes = cv2.bitwise_and(closed_mask, cv2.bitwise_not(binary))
-        if cv2.countNonZero(holes) > 0:
-            alpha = cv2.add(alpha, holes)
-            has_change = True
-    
-    if not has_change:
-        return pil_img
-    
-    img_array[:, :, 3] = alpha
-    return Image.fromarray(img_array, mode='RGBA')
-
-def fill_alpha_with_bg(pil_img, bg_type: str, bg_color: str = "#FFFFFF", bg_image_path: str = None):
-    """填充背景"""
-    if pil_img.mode != 'RGBA': 
-        pil_img = pil_img.convert('RGBA')
-    if bg_type == "none": 
-        return pil_img
-    
-    if bg_type == "color":
-        c = bg_color.strip().lstrip('#')
-        rgb = tuple(int(c[i:i+2], 16) for i in (0, 2, 4)) if len(c) == 6 else (255,255,255)
-        base = Image.new('RGB', pil_img.size, rgb)
-    elif bg_type == "image" and bg_image_path and Path(bg_image_path).exists():
-        try:
-            base = Image.open(bg_image_path).convert('RGB').resize(pil_img.size, Image.Resampling.LANCZOS)
-        except: 
-            base = Image.new('RGB', pil_img.size, (255, 255, 255))
-    else:
-        base = Image.new('RGB', pil_img.size, (255, 255, 255))
-    
-    base.paste(pil_img, mask=pil_img.split()[-1])
-    return base
-
-def process_single_frame(frame_data: tuple, session, params: dict, model_id: str = "u2net") -> tuple:
-    """处理单帧"""
-    idx, frame_rgb = frame_data
-    
-    try:
-        pil = Image.fromarray(frame_rgb)
-        
-        if params.get("remove_bg"):
-            pil = remove_bg_with_session_smart(pil, session, model_id)
-            
-            if params.get("cleanup_edge"):
-                pil = cleanup_edge_pixels(
-                    pil, 
-                    params.get("edge_feather", 1), 
-                    params.get("edge_blur", 1),
-                    params.get("edge_gamma", 1.2)
-                )
-            if params.get("remove_isolated"):
-                pil = remove_isolated_colors(
-                    pil, 
-                    params.get("isolated_area", 50),
-                    params.get("remove_internal", True),
-                    params.get("internal_max_area", 100)
-                )
-            if params.get("bg_type", "none") != "none":
-                pil = fill_alpha_with_bg(pil, params.get("bg_type"), params.get("bg_color"), params.get("bg_image"))
-        else:
-            pil = pil.convert("RGBA")
-        
-        return (idx, pil, None)
-    except Exception as e:
-        return (idx, None, str(e))
-
-# ==================== Workers ====================
-class BaseWorker(QThread):
-    """基础 Worker 类"""
-    progress = Signal(int, str)
-    finished = Signal(dict)
-    error = Signal(str)
-    
-    def __init__(self):
-        super().__init__()
-        self._stop = False
-    
-    def stop(self):
-        self._stop = True
-        logger.info("正在停止任务...")
-
-class ModelLoadWorker(QThread):
-    finished = Signal(object, str)
-    error = Signal(str)
-    def __init__(self, model_id: str):
-        super().__init__()
-        self.model_id = model_id
-    def run(self):
-        try:
-            s = ModelManager.load_model(self.model_id)
-            if s:
-                self.finished.emit(s, self.model_id)
-            else:
-                self.error.emit("模型加载失败")
-        except Exception as e:
-            self.error.emit(str(e))
-
-class VideoToImagesWorker(BaseWorker):
-    def __init__(self, video_path: str, output_dir: str, params: dict):
-        super().__init__()
-        self.video_path = Path(video_path)
-        self.output_dir = Path(output_dir)
-        self.params = params
-
-    def run(self):
-        if not HAS_CV2:
-            self.error.emit("opencv-python 未安装")
-            return
-            
-        try:
-            output_folder = self.output_dir / self.video_path.stem
-            output_folder.mkdir(parents=True, exist_ok=True)
-            cap = cv2.VideoCapture(str(self.video_path))
-            if not cap.isOpened():
-                self.error.emit(f"无法打开视频：{self.video_path}")
-                return
-            
-            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            step = max(1, int(self.params.get("frame_step", 1)))
-            need_remove_bg = self.params.get("remove_bg") and USE_REMBG
-            
-            if self.params.get("extract_mode") == "first_last":
-                frames_idx = [0, max(0, total-1)]
-                names = ["_AA", "_BB"]
-            else:
-                frames_idx = list(range(0, total, step))
-                names = [f"_{i+1:06d}" for i in range(len(frames_idx))]
-            
-            total_frames = len(frames_idx)
-            logger.info(f"准备提取 {total_frames} 帧 (共 {total} 帧, 间隔 {step})")
-            
-            if not need_remove_bg:
-                logger.info("快速模式：直接提取帧（无背景处理）")
-                saved = 0
-                for i, idx in enumerate(frames_idx):
-                    if self._stop:
-                        break
-                    
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-                    ret, frame = cap.read()
-                    if ret:
-                        suffix = names[i]
-                        out_path = output_folder / f"{self.video_path.stem}{suffix}.png"
-                        
-                        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        Image.fromarray(frame_rgb).save(str(out_path))
-                        saved += 1
-                    
-                    self.progress.emit(int((i + 1) / total_frames * 100), f"提取帧 {i+1}/{total_frames}")
-                
-                cap.release()
-                logger.success(f"快速提取完成: 保存 {saved} 张图片")
-                self.finished.emit({"count": saved, "folder": str(output_folder)})
-                return
-            
-            model_name = self.params.get("model_name", "isnet-general-use")
-            self.progress.emit(0, f"加载模型 {model_name}...")
-            session = ModelManager.load_model(model_name)
-            if not session:
-                self.error.emit(f"模型加载失败")
-                cap.release()
-                return
-            
-            frames_data = []
-            for i, idx in enumerate(frames_idx):
-                if self._stop: break
-                cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-                ret, frame = cap.read()
-                if ret:
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    frames_data.append((i, frame_rgb))
-                self.progress.emit(int((i + 1) / total_frames * 20), f"读取帧 {i+1}/{total_frames}")
-            cap.release()
-            
-            if not frames_data:
-                self.error.emit("无有效帧")
-                return
-            
-            num_workers = min(self.params.get("num_threads", 4), len(frames_data))
-            processed = 0
-            results = {}
-            
-            logger.info(f"开始处理 {len(frames_data)} 帧 (使用 {num_workers} 线程)")
-            
-            with ThreadPoolExecutor(max_workers=num_workers) as executor:
-                futures = {
-                    executor.submit(process_single_frame, fd, session, self.params, model_name): fd[0]
-                    for fd in frames_data
-                }
-                
-                for future in as_completed(futures):
-                    if self._stop:
-                        break
-                    
-                    idx, pil, err = future.result()
-                    if err:
-                        logger.warning(f"帧 {idx} 处理失败: {err}")
-                    else:
-                        results[idx] = pil
-                    
-                    processed += 1
-                    self.progress.emit(20 + int(processed / len(frames_data) * 70), f"处理帧 {processed}/{len(frames_data)}")
-                    
-                    if processed % 10 == 0:
-                        gc.collect()
-            
-            self.progress.emit(90, "保存图片...")
-            saved = 0
-            for i in range(len(frames_data)):
-                if i in results:
-                    suffix = names[i] if self.params.get("extract_mode") == "first_last" else f"_{saved+1:06d}"
-                    results[i].save(str(output_folder / f"{self.video_path.stem}{suffix}.png"))
-                    saved += 1
-            
-            gc.collect()
-            logger.success(f"完成: 保存 {saved} 张图片")
-            self.finished.emit({"count": saved, "folder": str(output_folder)})
-            
-        except Exception as e:
-            logger.error(f"处理失败: {e}")
-            traceback.print_exc()
-            self.error.emit(str(e))
-
-class VideoRemoveBgWorker(BaseWorker):
-    """视频扣像 Worker"""
-
-    def __init__(self, video_path: str, output_path: str, params: dict):
-        super().__init__()
-        self.video_path = Path(video_path)
-        self.output_path = Path(output_path)
-        self.params = params
-
-    def run(self):
-        if not HAS_CV2:
-            self.error.emit("opencv-python 未安装")
-            return
-            
-        try:
-            cap = cv2.VideoCapture(str(self.video_path))
-            if not cap.isOpened():
-                self.error.emit(f"无法打开视频：{self.video_path}")
-                return
-            
-            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            fps = cap.get(cv2.CAP_PROP_FPS) or 30
-            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            
-            model_name = self.params.get("model_name", "isnet-general-use")
-            self.progress.emit(0, f"加载模型 {model_name}...")
-            session = ModelManager.load_model(model_name)
-            if not session:
-                self.error.emit(f"模型加载失败")
-                cap.release()
-                return
-            
-            output_format = self.params.get("output_format", "mp4")
-            preserve_alpha = self.params.get("preserve_alpha", False)
-
-            if output_format == "webm" and preserve_alpha:
-                self._save_webm_with_alpha(cap, session, model_name, total, width, height, fps)
-                return
-            elif output_format == "webm":
-                fourcc = cv2.VideoWriter_fourcc(*'VP90')
-                out_file = str(self.output_path)
-            elif output_format == "mov":
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                out_file = str(self.output_path)
-            else:
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                out_file = str(self.output_path)
-            
-            writer = cv2.VideoWriter(out_file, fourcc, fps, (width, height))
-            
-            if not writer.isOpened():
-                self.error.emit("无法创建输出视频")
-                cap.release()
-                return
-            
-            frame_idx = 0
-            processed = 0
-            start_time = time.time()
-            
-            logger.info(f"开始处理视频: {total} 帧, {width}x{height}, {fps:.1f}fps")
-            
-            while True:
-                if self._stop:
-                    break
-                
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                pil = Image.fromarray(frame_rgb)
-                
-                pil = remove_bg_with_session_smart(pil, session, model_name)
-                
-                if self.params.get("cleanup_edge"):
-                    pil = cleanup_edge_pixels(
-                        pil,
-                        self.params.get("edge_feather", 1),
-                        self.params.get("edge_blur", 1),
-                        self.params.get("edge_gamma", 1.2)
-                    )
-                
-                if self.params.get("remove_isolated"):
-                    pil = remove_isolated_colors(
-                        pil,
-                        self.params.get("isolated_area", 50),
-                        self.params.get("remove_internal", True),
-                        self.params.get("internal_max_area", 100)
-                    )
-                
-                bg_color = self.params.get("bg_color", "#00FF00")
-                pil = fill_alpha_with_bg(pil, "color", bg_color)
-                
-                frame_out = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
-                writer.write(frame_out)
-                
-                frame_idx += 1
-                processed += 1
-                
-                if frame_idx % 10 == 0:
-                    dur = time.time() - start_time
-                    avg = frame_idx / max(dur, 1e-6)
-                    rem = max(0, total - frame_idx)
-                    eta = rem / max(avg, 1e-6)
-                    m = int(eta // 60)
-                    s = int(eta % 60)
-                    eta_str = f"{m}:{s:02d}"
-                    self.progress.emit(int(frame_idx / total * 100), f"处理帧 {frame_idx}/{total} | {avg:.2f} fps | 剩余 {eta_str}")
-                    gc.collect()
-            
-            cap.release()
-            writer.release()
-            gc.collect()
-            
-            dur = round(time.time() - start_time, 2)
-            avg_fps = round(processed / max(dur, 1e-6), 2)
-            self.progress.emit(100, "处理完成")
-            logger.success(f"视频扣像完成: {self.output_path} | 帧数 {processed} | 耗时 {dur}s | 平均 {avg_fps} fps")
-            self.finished.emit({
-                "video": str(self.output_path),
-                "frames": processed,
-                "folder": str(self.output_path.parent),
-                "duration": dur,
-                "avg_fps": avg_fps
-            })
-            
-        except Exception as e:
-            logger.error(f"视频扣像失败: {e}")
-            traceback.print_exc()
-            self.error.emit(str(e))
-
-    def _save_webm_with_alpha(self, cap, session, model_name, total, width, height, fps):
-        try:
-            import imageio
-            import importlib.util
-            import subprocess
-            use_ffmpeg_plugin = importlib.util.find_spec('imageio_ffmpeg') is not None
-            out_crf = int(self.params.get('crf', 32))
-            out_cpu = int(self.params.get('cpu_used', 6))
-            threads = max(1, (os.cpu_count() or 4))
-            include_audio = bool(self.params.get('include_audio', True))
-            padded_w = width + (width % 2)
-            padded_h = height + (height % 2)
-            speed_text = str(self.params.get('speed_mode', '平衡'))
-            deadline = 'good'
-            tile_cols = '2'
-            if speed_text in ['快速', 'fast']:
-                out_cpu = max(out_cpu, 8)
-                deadline = 'realtime'
-                tile_cols = '2'
-            elif speed_text in ['高质量', 'quality']:
-                out_cpu = min(out_cpu, 4)
-                deadline = 'good'
-                tile_cols = '1'
-            start_time = time.time()
-
-            if use_ffmpeg_plugin and not include_audio:
-                writer = imageio.get_writer(
-                    str(self.output_path),
-                    format='FFMPEG',
-                    fps=fps,
-                    codec='libvpx-vp9',
-                    pixelformat='yuva420p',
-                    output_params=['-b:v','0','-crf',str(out_crf),'-deadline',deadline,'-cpu-used',str(out_cpu),'-row-mt','1','-auto-alt-ref','0','-threads',str(threads),'-tile-columns',tile_cols,'-an'],
-                    macro_block_size=1
-                )
-            else:
-                ffmpeg_bin = ConfigManager.get_tool_path('ffmpeg')
-                cmd = [
-                    ffmpeg_bin, '-y',
-                    '-f', 'rawvideo',
-                    '-vcodec', 'rawvideo',
-                    '-pix_fmt', 'rgba',
-                    '-s', f'{padded_w}x{padded_h}',
-                    '-r', str(fps),
-                    '-i', 'pipe:0',
-                ]
-                if include_audio and getattr(self, 'video_path', None):
-                    cmd += ['-i', str(self.video_path)]
-                cmd += [
-                    '-c:v', 'libvpx-vp9',
-                    '-pix_fmt', 'yuva420p',
-                    '-b:v','0','-crf',str(out_crf),'-deadline',deadline,'-cpu-used',str(out_cpu),'-row-mt','1','-auto-alt-ref','0','-threads',str(threads),'-tile-columns',tile_cols,
-                ]
-                if include_audio:
-                    cmd += ['-map', '0:v:0', '-map', '1:a?', '-c:a', 'libopus', '-b:a', '128k', '-ar', '48000', '-shortest']
-                else:
-                    cmd += ['-an']
-                cmd += [
-                    str(self.output_path)
-                ]
-                proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-                stderr_lines = []
-                def _drain_stderr(p, buf):
+    def download_with_retry(self, url, dest_path, max_retries=3, timeout=120, progress_cb=None):
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                self.log(f"  尝试 {attempt + 1}/{max_retries}: {url[:70]}...")
+                req = urllib.request.Request(url, headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept': '*/*', 'Connection': 'keep-alive',
+                })
+                opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=self.ssl_context))
+                with opener.open(req, timeout=timeout) as response:
+                    total_size = int(response.headers.get('content-length', 0))
+                    downloaded = 0
+                    temp_path = dest_path + ".tmp"
+                    with open(temp_path, 'wb') as f:
+                        while True:
+                            chunk = response.read(65536)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if progress_cb and total_size > 0:
+                                progress_cb(downloaded / total_size * 100)
+                    if os.path.exists(dest_path):
+                        os.remove(dest_path)
+                    os.rename(temp_path, dest_path)
+                    file_size = os.path.getsize(dest_path)
+                    if file_size < 100000:
+                        raise Exception(f"文件太小({file_size}字节)")
+                    self.log(f"  ✓ 下载完成 ({file_size / 1024 / 1024:.1f}MB)")
+                    return True
+            except Exception as e:
+                last_error = e
+                self.log(f"  ⚠️ 失败: {str(e)[:60]}")
+                if os.path.exists(dest_path + ".tmp"):
                     try:
-                        for line in iter(p.stderr.readline, b''):
-                            try:
-                                buf.append(line.decode(errors='ignore'))
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-                t_err = threading.Thread(target=_drain_stderr, args=(proc, stderr_lines), daemon=True)
-                t_err.start()
-
-            frame_idx = 0
-
-            while True:
-                if self._stop:
-                    break
-
-                ret, frame = cap.read()
-                if not ret:
-                    break
-
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                pil = Image.fromarray(frame_rgb)
-
-                pil = remove_bg_with_session_smart(pil, session, model_name)
-
-                if self.params.get("cleanup_edge"):
-                    pil = cleanup_edge_pixels(
-                        pil,
-                        self.params.get("edge_feather", 1),
-                        self.params.get("edge_blur", 1),
-                        self.params.get("edge_gamma", 1.2)
-                    )
-
-                if self.params.get("remove_isolated"):
-                    pil = remove_isolated_colors(
-                        pil,
-                        self.params.get("isolated_area", 50),
-                        self.params.get("remove_internal", True),
-                        self.params.get("internal_max_area", 100)
-                    )
-
-                if pil.mode != 'RGBA':
-                    pil = pil.convert('RGBA')
-                if pil.size != (padded_w, padded_h):
-                    bg = Image.new('RGBA', (padded_w, padded_h), (0, 0, 0, 0))
-                    bg.paste(pil, (0, 0))
-                    pil = bg
-
-                if use_ffmpeg_plugin and not include_audio:
-                    writer.append_data(np.array(pil))
-                else:
-                    try:
-                        proc.stdin.write(pil.tobytes('raw', 'RGBA'))
-                    except Exception:
-                        raise
-
-                frame_idx += 1
-
-                if frame_idx % 10 == 0:
-                    dur = time.time() - start_time
-                    avg = frame_idx / max(dur, 1e-6)
-                    rem = max(0, total - frame_idx)
-                    eta = rem / max(avg, 1e-6)
-                    m = int(eta // 60)
-                    s = int(eta % 60)
-                    eta_str = f"{m}:{s:02d}"
-                    self.progress.emit(int(frame_idx / total * 100), f"处理帧 {frame_idx}/{total} | {avg:.2f} fps | 剩余 {eta_str}")
-                    gc.collect()
-
-            cap.release()
-            if use_ffmpeg_plugin and not include_audio:
-                writer.close()
-            else:
-                if proc.stdin:
-                    try:
-                        proc.stdin.close()
+                        os.remove(dest_path + ".tmp")
                     except:
                         pass
-                proc.wait()
+                if attempt < max_retries - 1:
+                    time.sleep(3 * (attempt + 1))
+        return False
+    
+    def download_component(self, key, progress_cb=None):
+        if key not in self.MIRRORS:
+            return False
+        mirrors = self.MIRRORS[key]
+        desc = self.DESCRIPTIONS.get(key, key)
+        self.log(f"\n{'='*50}\n📥 开始下载 {desc}\n{'='*50}")
+        
+        zip_path = os.path.join(PM.temp_dir, f"{key}_{int(time.time())}.zip")
+        os.makedirs(PM.temp_dir, exist_ok=True)
+        
+        success = False
+        for i, url in enumerate(mirrors):
+            self.log(f"\n📡 镜像源 {i + 1}/{len(mirrors)}")
+            if self.download_with_retry(url, zip_path, max_retries=2, timeout=180, progress_cb=progress_cb):
+                success = True
+                break
+        
+        if not success:
+            return False
+        
+        try:
+            self.log(f"\n📦 解压并安装...")
+            result = self._extract_and_install(zip_path, key)
+            if result:
+                PM.refresh()
+                if PM.is_exe_available(key):
+                    self.log(f"✅ {desc} 安装成功!")
+                    return True
+            return False
+        except Exception as e:
+            self.log(f"❌ 解压失败: {e}")
+            return False
+        finally:
+            if os.path.exists(zip_path):
                 try:
-                    t_err.join(timeout=2.0)
-                except Exception:
+                    os.remove(zip_path)
+                except:
                     pass
-                if proc.returncode != 0:
-                    err = "\n".join(stderr_lines[-200:]) if stderr_lines else ''
-                    raise RuntimeError(f'ffmpeg 写入失败: {err}')
-            gc.collect()
-
-            dur = round(time.time() - start_time, 2)
-            avg_fps = round(frame_idx / max(dur, 1e-6), 2)
-            self.progress.emit(100, "处理完成")
-            logger.success(f"透明 WebM 视频生成完成: {self.output_path} | 帧数 {frame_idx} | 耗时 {dur}s | 平均 {avg_fps} fps")
-            self.finished.emit({
-                "video": str(self.output_path),
-                "frames": frame_idx,
-                "folder": str(self.output_path.parent),
-                "duration": dur,
-                "avg_fps": avg_fps
-            })
-
-        except Exception as e:
-            logger.error(f"透明 WebM 保存失败: {e}")
-            traceback.print_exc()
-            self.error.emit(str(e))
-
-class SpriteWorker(BaseWorker):
-    def __init__(self, source_path: str, output_dir: str, params: dict):
-        super().__init__()
-        self.source_path = Path(source_path)
-        self.output_dir = Path(output_dir)
-        self.params = params
-
-    def run(self):
+    
+    def _extract_and_install(self, zip_path, key):
+        extract_dir = os.path.join(PM.temp_dir, f"extract_{key}_{int(time.time())}")
         try:
-            need_remove_bg = self.params.get("remove_bg") and USE_REMBG
-            model_name = self.params.get("model_name", "isnet-general-use")
-            session = None
+            if os.path.exists(extract_dir):
+                shutil.rmtree(extract_dir)
+            os.makedirs(extract_dir)
             
-            if need_remove_bg:
-                self.progress.emit(0, f"加载模型 {model_name}...")
-                session = ModelManager.load_model(model_name)
+            with zipfile.ZipFile(zip_path, 'r') as z:
+                z.extractall(extract_dir)
             
-            frames_data = []
-            frames_pil = []
-            
-            if self.params.get("source_type") == "video":
-                if not HAS_CV2:
-                    self.error.emit("opencv-python 未安装")
-                    return
-                    
-                cap = cv2.VideoCapture(str(self.source_path))
-                total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                step = max(1, self.params.get("frame_step", 1))
-                
-                frame_count = 0
-                for i in range(0, total, step):
-                    if self._stop: break
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-                    ret, f = cap.read()
-                    if ret:
-                        frame_rgb = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
-                        if need_remove_bg:
-                            frames_data.append((frame_count, frame_rgb))
-                        else:
-                            frames_pil.append(Image.fromarray(frame_rgb).convert("RGBA"))
-                        frame_count += 1
-                        self.progress.emit(int(i/total*30), f"采样 {frame_count}")
-                cap.release()
-            elif self.params.get("source_type") == "sheet":
-                img = Image.open(self.source_path).convert("RGBA")
-                w, h = img.size
-                if self.params.get("auto_detect"):
-                    g = math.gcd(w, h)
-                    rows = max(1, h // g)
-                    cols = max(1, w // g)
-                else:
-                    rows = max(1, int(self.params.get("existing_rows", 1)))
-                    cols = max(1, int(self.params.get("existing_cols", 1)))
-                cell_w = w // cols
-                cell_h = h // rows
-                total_cells = rows * cols
-                for idx in range(total_cells):
-                    if self._stop: break
-                    c = idx % cols
-                    r = idx // cols
-                    box = (c * cell_w, r * cell_h, (c+1) * cell_w, (r+1) * cell_h)
-                    frames_pil.append(img.crop(box))
-                    self.progress.emit(int((idx+1)/total_cells*30), f"切片 {idx+1}/{total_cells}")
-            else:
-                files = sorted([f for f in (self.source_path.glob('*') if self.source_path.is_dir() else [self.source_path]) 
-                              if f.suffix.lower() in ['.png', '.jpg', '.jpeg', '.bmp']])
-                for i, f in enumerate(files):
-                    if self._stop: break
-                    img = Image.open(f)
-                    if need_remove_bg:
-                        frames_data.append((i, np.array(img.convert("RGB"))))
-                    else:
-                        frames_pil.append(img.convert("RGBA"))
-                    self.progress.emit(int((i+1)/len(files)*30), f"加载 {i+1}/{len(files)}")
-
-            if need_remove_bg:
-                if not frames_data:
-                    self.error.emit("无有效帧")
-                    return
-                
-                num_workers = min(self.params.get("num_threads", 4), len(frames_data))
-                processed = 0
-                results = {}
-                
-                logger.info(f"处理 {len(frames_data)} 帧 (使用 {num_workers} 线程)")
-                
-                with ThreadPoolExecutor(max_workers=num_workers) as executor:
-                    futures = {
-                        executor.submit(process_single_frame, fd, session, self.params, model_name): fd[0]
-                        for fd in frames_data
-                    }
-                    
-                    for future in as_completed(futures):
-                        if self._stop:
-                            break
-                        
-                        idx, pil, err = future.result()
-                        if not err:
-                            results[idx] = pil
-                        
-                        processed += 1
-                        self.progress.emit(30 + int(processed / len(frames_data) * 40), f"处理帧 {processed}/{len(frames_data)}")
-                        
-                        if processed % 10 == 0:
-                            gc.collect()
-                
-                frames = [results[i] for i in range(len(frames_data)) if i in results]
-            else:
-                frames = frames_pil
-                logger.info(f"快速模式：直接使用 {len(frames)} 帧")
-            
-            if not frames:
-                self.error.emit("无有效帧")
-                return
-
-            keep_spec = self.params.get("keep_frames")
-            if keep_spec:
-                def parse_ranges(spec, n):
-                    res = set()
-                    for part in spec.replace('，', ',').split(','):
-                        part = part.strip()
-                        if not part: continue
-                        if '-' in part:
-                            a, b = part.split('-', 1)
-                            try:
-                                s = max(1, int(a)); e = min(n, int(b))
-                                for k in range(s, e+1): res.add(k-1)
-                            except: pass
-                        else:
-                            try:
-                                k = int(part); 
-                                if 1 <= k <= n: res.add(k-1)
-                            except: pass
-                    return sorted(res)
-                idxs = parse_ranges(keep_spec, len(frames))
-                if idxs:
-                    frames = [frames[i] for i in idxs]
-
-            fw, fh = frames[0].size
-            if self.params.get("scale_mode") == "percent":
-                sc = self.params.get("scale_percent", 100) / 100
-                tw, th = int(fw*sc), int(fh*sc)
-            else:
-                tw, th = int(self.params.get("thumb_w", 256)), int(self.params.get("thumb_h", 256))
-            
-            cols = self.params.get("columns", 10)
-            rows = math.ceil(len(frames)/cols)
-            sheet = Image.new("RGBA", (cols*tw, rows*th))
-            
-            for idx, fr in enumerate(frames):
-                if self._stop: break
-                thumb = fr.resize((tw, th), Image.Resampling.LANCZOS)
-                c, r = idx % cols, idx // cols
-                sheet.paste(thumb, (c*tw, r*th), thumb)
-                self.progress.emit(70 + int((idx+1)/len(frames)*30), "合成中...")
-            
-            out_name = f"{self.source_path.stem}_sprite_{len(frames)}{'_bj' if self.params.get('edit_mode') else ''}.png"
-            out_path = self.output_dir / out_name
-            sheet.save(out_path)
-            
-            gc.collect()
-            logger.success(f"精灵图生成完成: {out_path}")
-            self.finished.emit({"sheet": str(out_path), "count": len(frames), "folder": str(self.output_dir)})
-            
-        except Exception as e:
-            logger.error(f"精灵图生成失败: {e}")
-            traceback.print_exc()
-            self.error.emit(str(e))
-
-class SpriteWorkerWithEditor(BaseWorker):
-    frames_ready = Signal(list, str)
-    def __init__(self, source_path: str, output_dir: str, params: dict, parent_window):
-        super().__init__()
-        self.source_path = Path(source_path)
-        self.output_dir = Path(output_dir)
-        self.params = params
-        self.parent_window = parent_window
-    def run(self):
-        try:
-            need_remove_bg = self.params.get("remove_bg") and USE_REMBG
-            model_name = self.params.get("model_name", "isnet-general-use")
-            session = None
-            if need_remove_bg:
-                self.progress.emit(0, f"加载模型 {model_name}...")
-                session = ModelManager.load_model(model_name)
-            frames = []
-            if self.params.get("source_type") == "video":
-                if not HAS_CV2:
-                    self.error.emit("opencv-python 未安装")
-                    return
-                cap = cv2.VideoCapture(str(self.source_path))
-                total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                step = max(1, self.params.get("frame_step", 1))
-                data = []
-                for i in range(0, total, step):
-                    if self._stop: break
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-                    ret, f = cap.read()
-                    if ret:
-                        frame_rgb = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
-                        data.append((len(data), frame_rgb))
-                        self.progress.emit(int(i/total*30), f"采样 {len(data)}")
-                cap.release()
-                if need_remove_bg:
-                    # 修复：确保 num_workers 至少为 1，防止 ValueError
-                    num_workers = max(1, min(self.params.get("num_threads", 4), len(data)))
-                    results = {}
-                    processed = 0
-                    with ThreadPoolExecutor(max_workers=num_workers) as executor:
-                        futures = {executor.submit(process_single_frame, fd, session, self.params, model_name): fd[0] for fd in data}
-                        for future in as_completed(futures):
-                            if self._stop: break
-                            idx, pil, err = future.result()
-                            if not err:
-                                results[idx] = pil
-                            processed += 1
-                            self.progress.emit(30 + int(processed / max(1,len(data)) * 40), f"处理帧 {processed}/{len(data)}")
-                    frames = [results[i] for i in range(len(data)) if i in results]
-                else:
-                    for _, rgb in data:
-                        frames.append(Image.fromarray(rgb).convert("RGBA"))
-            else:
-                files = sorted([f for f in (self.source_path.glob('*') if self.source_path.is_dir() else [self.source_path]) if f.suffix.lower() in ['.png', '.jpg', '.jpeg', '.bmp']])
-                data = []
-                for i, fp in enumerate(files):
-                    if self._stop: break
-                    img = Image.open(fp).convert("RGB")
-                    data.append((i, np.array(img)))
-                    self.progress.emit(int((i+1)/len(files)*30), f"加载 {i+1}/{len(files)}")
-                if need_remove_bg:
-                    # 修复：确保 num_workers 至少为 1，防止 ValueError
-                    num_workers = max(1, min(self.params.get("num_threads", 4), len(data)))
-                    results = {}
-                    processed = 0
-                    with ThreadPoolExecutor(max_workers=num_workers) as executor:
-                        futures = {executor.submit(process_single_frame, fd, session, self.params, model_name): fd[0] for fd in data}
-                        for future in as_completed(futures):
-                            if self._stop: break
-                            idx, pil, err = future.result()
-                            if not err:
-                                results[idx] = pil
-                            processed += 1
-                            self.progress.emit(30 + int(processed / max(1,len(data)) * 40), f"处理帧 {processed}/{len(data)}")
-                    frames = [results[i] for i in range(len(data)) if i in results]
-                else:
-                    for _, arr in data:
-                        frames.append(Image.fromarray(arr).convert("RGBA"))
-            if not frames:
-                self.error.emit("无有效帧")
-                return
-            fw, fh = frames[0].size
-            if self.params.get("scale_mode") == "percent":
-                sc = self.params.get("scale_percent", 100) / 100
-                tw, th = int(fw*sc), int(fh*sc)
-            else:
-                tw, th = int(self.params.get("thumb_w", 256)), int(self.params.get("thumb_h", 256))
-            scaled_frames = [fr.resize((tw, th), Image.Resampling.LANCZOS) for fr in frames]
-            self.progress.emit(95, "准备编辑器...")
-            self.frames_ready.emit(scaled_frames, str(self.source_path))
-        except Exception as e:
-            logger.error(f"精灵图生成失败: {e}")
-            traceback.print_exc()
-            self.error.emit(str(e))
-
-    def _open_editor(self, frames):
-        try:
-            dialog = SpriteEditorDialog(self.parent_window, source_frames=frames)
-            if dialog.exec() == QDialog.Accepted:
-                selected_frames = dialog.get_selected_frames()
-                output_cols = dialog.get_output_cols()
-                if not selected_frames:
-                    logger.warning("未选择任何帧")
-                    self.finished.emit({"folder": str(self.output_dir)})
-                    return
-                fw, fh = selected_frames[0].size
-                rows = math.ceil(len(selected_frames) / max(1, output_cols))
-                sheet = Image.new("RGBA", (output_cols * fw, rows * fh))
-                for idx, frame in enumerate(selected_frames):
-                    c, r = idx % output_cols, idx // output_cols
-                    if frame.mode != 'RGBA':
-                        frame = frame.convert('RGBA')
-                    sheet.paste(frame, (c * fw, r * fh), frame)
-                out_name = f"{self.source_path.stem}_bj_{len(selected_frames)}.png"
-                out_path = self.output_dir / out_name
-                sheet.save(str(out_path))
-                gc.collect()
-                logger.success(f"编辑精灵图生成完成: {out_path}")
-                self.finished.emit({"sheet": str(out_path), "count": len(selected_frames), "folder": str(self.output_dir)})
-            else:
-                logger.info("用户取消编辑")
-                self.finished.emit({"folder": str(self.output_dir)})
-        except Exception as e:
-            logger.error(f"编辑器错误: {e}")
-            self.error.emit(str(e))
-
-class VideoToGifWorker(BaseWorker):
-    def __init__(self, video_path: str, output_path: str, params: dict):
-        super().__init__()
-        self.video_path = Path(video_path)
-        self.output_path = Path(output_path)
-        self.params = params
-
-    def run(self):
-        if not HAS_CV2:
-            self.error.emit("opencv-python 未安装")
-            return
-            
-        try:
-            cap = cv2.VideoCapture(str(self.video_path))
-            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            step = max(1, self.params.get("frame_step", 1))
-            
-            preserve_transparency = self.params.get("preserve_transparency", False)
-            need_remove_bg = self.params.get("remove_bg") and USE_REMBG
-            model_name = self.params.get("model_name", "isnet-general-use")
-            session = None
-            
-            if need_remove_bg:
-                self.progress.emit(0, f"加载模型 {model_name}...")
-                session = ModelManager.load_model(model_name)
-
-            total_to_extract = len(range(0, total, step))
-            logger.info(f"准备提取 {total_to_extract} 帧 (共 {total} 帧, 间隔 {step})")
-            
-            if not need_remove_bg:
-                logger.info("快速模式：直接提取帧生成 GIF")
-                frames = []
-                frame_count = 0
-                for i in range(0, total, step):
-                    if self._stop: break
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-                    ret, f = cap.read()
-                    if ret:
-                        frame_rgb = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
-                        pil = Image.fromarray(frame_rgb)
-                        frames.append(pil)
-                        frame_count += 1
-                    self.progress.emit(int(frame_count / total_to_extract * 80), f"提取帧 {frame_count}/{total_to_extract}")
-                cap.release()
-            else:
-                frames_data = []
-                frame_count = 0
-                for i in range(0, total, step):
-                    if self._stop: break
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-                    ret, f = cap.read()
-                    if ret:
-                        frame_rgb = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
-                        frames_data.append((frame_count, frame_rgb))
-                        frame_count += 1
-                    self.progress.emit(int(frame_count / total_to_extract * 20), f"读取帧 {frame_count}/{total_to_extract}")
-                cap.release()
-                
-                if not frames_data:
-                    self.error.emit("无帧")
-                    return
-
-                num_workers = min(self.params.get("num_threads", 4), len(frames_data))
-                processed = 0
-                results = {}
-                
-                logger.info(f"处理 {len(frames_data)} 帧 (使用 {num_workers} 线程)")
-                
-                with ThreadPoolExecutor(max_workers=num_workers) as executor:
-                    futures = {
-                        executor.submit(process_single_frame, fd, session, self.params, model_name): fd[0]
-                        for fd in frames_data
-                    }
-                    
-                    for future in as_completed(futures):
-                        if self._stop:
-                            break
-                        
-                        idx, pil, err = future.result()
-                        if not err:
-                            results[idx] = pil
-                        
-                        processed += 1
-                        self.progress.emit(20 + int(processed / len(frames_data) * 60), f"处理帧 {processed}/{len(frames_data)}")
-                        
-                        if processed % 10 == 0:
-                            gc.collect()
-                
-                frames = [results[i] for i in range(len(frames_data)) if i in results]
-            
-            if not frames:
-                self.error.emit("无帧")
-                return
-
-            duration = int(1000 / max(1, self.params.get("fps", 10)))
-            
-            self.progress.emit(90, "生成 GIF...")
-            
-            save_kwargs = {
-                "save_all": True,
-                "append_images": frames[1:],
-                "duration": duration,
-                "loop": 0
-            }
-
-            if preserve_transparency and need_remove_bg:
-                converted_frames = []
-                for frame in frames:
-                    if frame.mode != 'RGBA':
-                        frame = frame.convert('RGBA')
-                    alpha = frame.split()[-1]
-                    frame_p = frame.convert('RGB').convert('P', palette=Image.ADAPTIVE, colors=255)
-                    mask = Image.eval(alpha, lambda a: 255 if a <= 128 else 0)
-                    frame_p.paste(255, mask)
-                    converted_frames.append(frame_p)
-                
-                save_kwargs["append_images"] = converted_frames[1:]
-                save_kwargs["transparency"] = 255
-                save_kwargs["disposal"] = 2
-                converted_frames[0].save(str(self.output_path), **save_kwargs)
-            else:
-                if frames[0].mode == 'RGBA':
-                    frames = [fill_alpha_with_bg(f, "color", "#FFFFFF") for f in frames]
-                frames[0].save(str(self.output_path), **save_kwargs)
-
-            gc.collect()
-            logger.success(f"GIF 生成完成: {self.output_path}")
-            self.finished.emit({"gif": str(self.output_path), "count": len(frames), "folder": str(self.output_path.parent)})
-            
-        except Exception as e:
-            logger.error(f"GIF 生成失败: {e}")
-            traceback.print_exc()
-            self.error.emit(str(e))
-
-class ImagesToGifWorker(BaseWorker):
-    def __init__(self, source_path: str, output_path: str, params: dict):
-        super().__init__()
-        self.source_path = Path(source_path)
-        self.output_path = Path(output_path)
-        self.params = params
-
-    def run(self):
-        try:
-            if self.source_path.is_dir():
-                files = sorted([f for f in self.source_path.glob('*') if f.suffix.lower() in ['.png', '.jpg', '.jpeg']])
-            else: 
-                files = [self.source_path]
-            
-            frames = []
-            preserve_transparency = self.params.get("preserve_transparency", False)
-            
-            for i, f in enumerate(files):
-                img = Image.open(f)
-                frames.append(img)
-                self.progress.emit(int((i+1)/len(files)*100), "加载中")
-            
-            duration = int(1000 / max(1, self.params.get("fps", 10)))
-            save_kwargs = {"save_all": True, "append_images": frames[1:], "duration": duration, "loop": 0}
-
-            if preserve_transparency:
-                converted_frames = []
-                for frame in frames:
-                    if frame.mode != 'RGBA': 
-                        frame = frame.convert('RGBA')
-                    alpha = frame.split()[-1]
-                    frame_p = frame.convert('RGB').convert('P', palette=Image.ADAPTIVE, colors=255)
-                    mask = Image.eval(alpha, lambda a: 255 if a <= 128 else 0)
-                    frame_p.paste(255, mask)
-                    converted_frames.append(frame_p)
-                save_kwargs["append_images"] = converted_frames[1:]
-                save_kwargs["transparency"] = 255
-                save_kwargs["disposal"] = 2
-                converted_frames[0].save(str(self.output_path), **save_kwargs)
-            else:
-                frames[0].save(str(self.output_path), **save_kwargs)
-                
-            logger.success(f"GIF 生成完成")
-            self.finished.emit({"gif": str(self.output_path), "count": len(frames), "folder": str(self.output_path.parent)})
-        except Exception as e:
-            logger.error(f"GIF 生成失败: {e}")
-            self.error.emit(str(e))
-
-class ImagesToVideoWorker(BaseWorker):
-    def __init__(self, source, output, params):
-        super().__init__()
-        self.source, self.output, self.params = Path(source), Path(output), params
-        
-    def run(self):
-        if not HAS_CV2:
-            self.error.emit("opencv-python 未安装")
-            return
-            
-        try:
-            files = sorted([f for f in self.source.glob('*') if f.suffix.lower() in ['.png','.jpg']]) if self.source.is_dir() else [self.source]
-            if not files: 
-                raise Exception("无图片")
-            fps = max(1, self.params.get("fps", 24))
-            
-            first_img = Image.open(files[0])
-            w, h = first_img.size
-            
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            writer = cv2.VideoWriter(str(self.output), fourcc, fps, (w, h))
-            
-            for i, f in enumerate(files):
-                if self._stop: break
-                img = Image.open(f).convert("RGBA")
-                if img.size != (w, h): 
-                    img = img.resize((w, h), Image.Resampling.LANCZOS)
-                bg = fill_alpha_with_bg(img, self.params.get("bg_type", "color"), self.params.get("bg_color", "#FFFFFF"), self.params.get("bg_image"))
-                frame = cv2.cvtColor(np.array(bg), cv2.COLOR_RGB2BGR)
-                writer.write(frame)
-                self.progress.emit(int((i+1)/len(files)*100), f"写入 {i+1}/{len(files)}")
-            
-            writer.release()
-            logger.success(f"视频生成完成")
-            self.finished.emit({"video": str(self.output), "folder": str(self.output.parent)})
-        except Exception as e:
-            logger.error(f"视频生成失败: {e}")
-            self.error.emit(str(e))
-
-class SingleImageWorker(BaseWorker):
-    def __init__(self, input_path, output_path, params):
-        super().__init__()
-        self.input, self.output, self.params = input_path, output_path, params
-        
-    def run(self):
-        try:
-            model_name = self.params.get("model_name", "isnet-general-use")
-            
-            self.progress.emit(5, f"加载模型 {model_name}...")
-            session = ModelManager.load_model(model_name)
-            
-            if not session:
-                self.error.emit(f"模型加载失败")
-                return
-            
-            self.progress.emit(20, "加载图片...")
-            pil = Image.open(self.input).convert("RGBA")
-            
-            self.progress.emit(40, "移除背景...")
-            pil = remove_bg_with_session_smart(pil, session, model_name)
-            
-            if self.params.get("cleanup_edge"): 
-                self.progress.emit(60, "清理边缘...")
-                pil = cleanup_edge_pixels(
-                    pil, 
-                    self.params.get("edge_feather", 1), 
-                    self.params.get("edge_blur", 1),
-                    self.params.get("edge_gamma", 1.2)
-                )
-            if self.params.get("remove_isolated"): 
-                self.progress.emit(75, "移除杂色...")
-                pil = remove_isolated_colors(
-                    pil, 
-                    self.params.get("isolated_area", 50),
-                    self.params.get("remove_internal", True),
-                    self.params.get("internal_max_area", 100)
-                )
-            if self.params.get("bg_type", "none") != "none": 
-                self.progress.emit(90, "填充背景...")
-                pil = fill_alpha_with_bg(pil, self.params.get("bg_type"), self.params.get("bg_color"), self.params.get("bg_image"))
-            
-            pil.save(self.output)
-            
-            # ==================== ICO 生成 ====================
-            if self.params.get("ico_enabled") and self.params.get("ico_sizes"):
-                self.progress.emit(95, "生成 ICO...")
+            installed_count = 0
+            for root, dirs, files in os.walk(extract_dir):
+                for f in files:
+                    if f.endswith('.exe'):
+                        src = os.path.join(root, f)
+                        dst = os.path.join(PM.tools_dir, f)
+                        try:
+                            if os.path.exists(dst):
+                                os.remove(dst)
+                            shutil.copy2(src, dst)
+                            installed_count += 1
+                        except:
+                            pass
+            return installed_count > 0
+        except:
+            return False
+        finally:
+            if os.path.exists(extract_dir):
                 try:
-                    ico_sizes = sorted(self.params["ico_sizes"], reverse=True)
-                    
-                    # 【优化】先将图片处理成正方形，避免拉伸变形
-                    # 使用 1px padding
-                    square_pil = make_square_with_padding(pil, padding=1)
-                    
-                    if square_pil:
-                        # 1. 保留透明通道
-                        if self.params.get("ico_transparent"):
-                            # 遍历所有选中的尺寸，分别生成单独的 ICO 文件
-                            for s in ico_sizes:
-                                try:
-                                    # 构建带尺寸后缀的文件名，如 image_32x32.ico
-                                    ico_name = f"{Path(self.output).stem}_{s}x{s}.ico"
-                                    ico_path = Path(self.output).parent / ico_name
-                                    
-                                    resized = square_pil.resize((s, s), Image.LANCZOS)
-                                    # 确保是 RGBA 模式
-                                    if resized.mode != 'RGBA':
-                                        resized = resized.convert('RGBA')
-                                    
-                                    # 保存单个尺寸的 ICO
-                                    resized.save(str(ico_path), format='ICO')
-                                except Exception as ex:
-                                    logger.error(f"生成 {s}x{s} ICO 失败: {ex}")
-                                
-                        # 2. 无透明通道 (白底)
-                        if self.params.get("ico_opaque"):
-                            for s in ico_sizes:
-                                try:
-                                    # 构建带尺寸后缀的文件名，如 image_32x32_noalpha.ico
-                                    ico_name = f"{Path(self.output).stem}_{s}x{s}_noalpha.ico"
-                                    ico_path_opaque = Path(self.output).parent / ico_name
-                                    
-                                    resized = square_pil.resize((s, s), Image.LANCZOS)
-                                    bg = Image.new("RGB", resized.size, (255, 255, 255))
-                                    if resized.mode == 'RGBA':
-                                        bg.paste(resized, mask=resized.split()[3])
-                                    else:
-                                        bg.paste(resized)
-                                    
-                                    # 保存单个尺寸的无透明 ICO
-                                    bg.save(str(ico_path_opaque), format='ICO')
-                                except Exception as ex:
-                                    logger.error(f"生成 {s}x{s} (无透明) ICO 失败: {ex}")
-                        
-                        # 3. 生成 PNG
-                        if self.params.get("ico_png"):
-                            for s in ico_sizes:
-                                try:
-                                    png_name = f"{Path(self.output).stem}_{s}x{s}.png"
-                                    png_path = Path(self.output).parent / png_name
-                                    
-                                    resized = square_pil.resize((s, s), Image.LANCZOS)
-                                    resized.save(str(png_path), format='PNG')
-                                except Exception as ex:
-                                    logger.error(f"生成 {s}x{s} PNG 失败: {ex}")
-                        
-                        # 4. 生成系统 ICO (多尺寸容器)
-                        if self.params.get("ico_system"):
-                            try:
-                                # 系统 ICO 推荐包含的尺寸
-                                # 注意：PIL save format='ICO' 时，可以通过 append_images 参数传入其他尺寸的图像
-                                # 第一个图像将作为主图像
-                                
-                                # 过滤出需要的尺寸
-                                target_sizes = sorted([s for s in ico_sizes if s in [16, 24, 32, 48, 256]], reverse=True)
-                                if not target_sizes:
-                                    target_sizes = [256, 48, 32, 16] # 默认回退
-                                
-                                ico_images = []
-                                for s in target_sizes:
-                                    resized = square_pil.resize((s, s), Image.LANCZOS)
-                                    if resized.mode != 'RGBA':
-                                        resized = resized.convert('RGBA')
-                                    ico_images.append(resized)
-                                
-                                if ico_images:
-                                    pcico_name = f"{Path(self.output).stem}_pcico.ico"
-                                    pcico_path = Path(self.output).parent / pcico_name
-                                    
-                                    # 第一个图像作为 base，其余作为附加
-                                    # 注意：append_images 应该是 Image 对象列表
-                                    ico_images[0].save(
-                                        str(pcico_path), 
-                                        format='ICO', 
-                                        append_images=ico_images[1:] if len(ico_images) > 1 else []
-                                    )
-                                    logger.success(f"系统 ICO 生成成功: {pcico_path}")
-                            except Exception as ex:
-                                logger.error(f"生成系统 ICO 失败: {ex}")
-                                
-                    else:
-                        logger.error("ICO 生成失败: 图片转正方形处理出错")
-                            
-                except Exception as e:
-                    logger.error(f"ICO 生成失败: {e}")
-                    # 不中断主流程
-            
-            self.progress.emit(100, "完成")
-            gc.collect()
-            logger.success(f"图片处理完成")
-            self.finished.emit({"output": str(self.output), "folder": str(Path(self.output).parent)})
-        except Exception as e:
-            logger.error(f"图片处理失败: {e}")
-            self.error.emit(str(e))
-# ==================== 第三部分：主窗口和程序入口 ====================
-
-# ==================== 主窗口 ====================
-class MainWindow(QWidget):
-    def __init__(self):
-        super().__init__()
-        
-        self.activated = False
-        self.trial_mode = False
-        # 【修复】使用总秒数进行倒计时，更简单可靠
-        self.trial_total_seconds = 15 * 60  # 15分钟 = 900秒
-        self.current_worker = None
-        self.trial_expired = False  # 标记试用是否已过期
-        
-        if LicenseManager.check_license_file():
-            self.activated = True
-        else:
-            dialog = ActivationDialog(None)
-            if dialog.exec() == QDialog.Accepted:
-                if dialog.activated: 
-                    self.activated = True
-                elif dialog.trial_mode: 
-                    self.trial_mode = True
-            else:
-                sys.exit()
-        
-        gpu_status = f"GPU: {HardwareInfo.gpu_name}" if HardwareInfo.gpu_available else "CPU模式"
-        base_title = f"别快视频精灵图 v7.6 [{gpu_status}]"
-        self.setWindowTitle(f"{base_title} - {'已激活' if self.activated else f'试用 (15:00)'}")
-        self.setFixedWidth(600)
-        self.setAcceptDrops(True)
-        
-        self.enable_sound = ConfigManager.get("enable_sound", True)
-        self._setup_style()
-        self._build_ui()
-        
-        # 【修复】试用模式定时器
-        if self.trial_mode and not self.activated:
-            self.trial_timer = QTimer(self)
-            self.trial_timer.timeout.connect(self._update_trial_countdown)
-            self.trial_timer.start(1000)  # 每秒更新
-        
-        logger.info("软件启动完成")
-        logger.info(f"模型目录: {ConfigManager.get_model_dir()}")
-        logger.info(f"biemo 目录: {ConfigManager.get_biemo_dir()}")
-
-    def _update_trial_countdown(self):
-        """【修复】更新试用倒计时 - 使用总秒数，逻辑清晰"""
-        if self.activated or self.trial_expired:
-            return
-        
-        # 每秒减1
-        self.trial_total_seconds -= 1
-        
-        # 计算分钟和秒
-        mins = self.trial_total_seconds // 60
-        secs = self.trial_total_seconds % 60
-        
-        # 更新窗口标题
-        gpu_status = f"GPU: {HardwareInfo.gpu_name}" if HardwareInfo.gpu_available else "CPU模式"
-        self.setWindowTitle(f"别快视频精灵图 v7.6 [{gpu_status}] - 试用 ({mins:02d}:{secs:02d})")
-        
-        if self.trial_total_seconds == 60:
-            logger.warning("⚠ 试用时间仅剩 1 分钟！请保存工作。")
-        
-        # 时间到
-        if self.trial_total_seconds <= 0:
-            self._handle_trial_expired()
-    
-    def _handle_trial_expired(self):
-        self.trial_expired = True
-        if hasattr(self, 'trial_timer'):
-            self.trial_timer.stop()
-        self._stop_current_task()
-        logger.error("试用时间已到！")
-        QApplication.quit()
-        sys.exit(0)
-    
-    def _start_exit_countdown(self):
-        """启动60秒退出倒计时"""
-        self.exit_countdown = 60
-        
-        self.exit_timer = QTimer(self)
-        self.exit_timer.timeout.connect(self._exit_countdown_tick)
-        self.exit_timer.start(1000)
-        
-        logger.warning(f"程序将在 {self.exit_countdown} 秒后退出...")
-    
-    def _exit_countdown_tick(self):
-        """退出倒计时"""
-        self.exit_countdown -= 1
-        
-        if self.exit_countdown <= 0:
-            self.exit_timer.stop()
-            logger.info("退出程序")
-            QApplication.quit()
-            sys.exit(0)
-        
-        if self.exit_countdown % 10 == 0:
-            logger.warning(f"程序将在 {self.exit_countdown} 秒后退出...")
-    
-    def _show_activation_dialog(self):
-        """显示激活对话框"""
-        dialog = ActivationDialog(self)
-        if dialog.exec() == QDialog.Accepted and dialog.activated:
-            self.activated = True
-            self.trial_expired = False
-            
-            # 停止退出定时器
-            if hasattr(self, 'exit_timer'):
-                self.exit_timer.stop()
-            
-            # 更新标题
-            gpu_status = f"GPU: {HardwareInfo.gpu_name}" if HardwareInfo.gpu_available else "CPU模式"
-            self.setWindowTitle(f"别快视频精灵图 v7.6 [{gpu_status}] - 已激活")
-            
-            logger.success("软件已激活！")
-            QMessageBox.information(self, "激活成功", "软件已永久激活！")
-    
-    def _stop_current_task(self):
-        """停止当前正在运行的任务"""
-        if self.current_worker and self.current_worker.isRunning():
-            logger.warning("正在停止当前任务...")
-            self.current_worker.stop()
-            self.current_worker.wait(5000)
-            if self.current_worker.isRunning():
-                self.current_worker.terminate()
-            logger.info("任务已停止")
-
-    def _setup_style(self):
-        self.setStyleSheet("""
-            QWidget { font-family: 'Microsoft YaHei UI'; font-size: 9pt; }
-            QGroupBox { font-weight: bold; border: 1px solid #3498db; border-radius: 4px; margin-top: 8px; padding-top: 8px; background: #f8f9fa; }
-            QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; color: #2c3e50; }
-            QPushButton { background: #3498db; color: white; border-radius: 3px; padding: 6px; font-weight: bold; }
-            QPushButton:hover { background: #2980b9; }
-            QPushButton#actionButton { background: #27ae60; font-size: 10pt; padding: 8px; }
-            QPushButton#stopButton { background: #e74c3c; }
-            QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox { padding: 4px; border: 1px solid #bdc3c7; border-radius: 3px; }
-            QProgressBar { border: 1px solid #bdc3c7; text-align: center; height: 20px; }
-            QProgressBar::chunk { background: #3498db; }
-        """)
-
-    def _build_ui(self):
-        main = QVBoxLayout()
-        
-        # 状态栏
-        status_layout = QHBoxLayout()
-        
-        gpu_label = QLabel(f"{'✓ ' + HardwareInfo.gpu_name if HardwareInfo.gpu_available else '○ CPU模式'}")
-        gpu_label.setStyleSheet(f"color: {'#27ae60' if HardwareInfo.gpu_available else '#e74c3c'}; font-weight: bold;")
-        status_layout.addWidget(gpu_label)
-        
-        mem_label = QLabel(f"内存: {HardwareInfo.available_memory_mb}MB")
-        status_layout.addWidget(mem_label)
-        
-        if HardwareInfo.gpu_available:
-            gpu_mem_label = QLabel(f"显存: {HardwareInfo.gpu_memory_mb}MB")
-            status_layout.addWidget(gpu_mem_label)
-        
-        rembg_label = QLabel(f"{'✓ rembg' if USE_REMBG else '✗ rembg'}")
-        rembg_label.setStyleSheet(f"color: {'#27ae60' if USE_REMBG else '#e74c3c'};")
-        status_layout.addWidget(rembg_label)
-        
-        status_layout.addStretch()
-        
-        license_label = QLabel(f"{'✓ 已激活' if self.activated else f'试用模式'}")
-        license_label.setStyleSheet(f"color: {'#27ae60' if self.activated else '#e74c3c'}; font-weight: bold;")
-        status_layout.addWidget(license_label)
-        
-        main.addLayout(status_layout)
-
-        # 主内容
-        self.splitter = QSplitter(Qt.Vertical)
-        
-        tab_widget = QWidget()
-        tab_layout = QVBoxLayout(tab_widget)
-        tab_layout.setContentsMargins(0, 0, 0, 0)
-        
-        self.tabs = QTabWidget()
-        self.tabs.addTab(self._build_sprite_tab(), "精灵图")
-        self.tabs.addTab(self._build_video_extract_tab(), "视频转图")
-        self.tabs.addTab(self._build_video_rembg_tab(), "视频扣像")
-        self.tabs.addTab(self._build_images_to_video_tab(), "图片转视频")
-        self.tabs.addTab(self._build_gif_tab(), "视频转GIF")
-        self.tabs.addTab(self._build_single_image_tab(), "图片扣图")
-        self.tabs.addTab(self._build_settings_tab(), "设置")
-        tab_layout.addWidget(self.tabs)
-        
-        self.splitter.addWidget(tab_widget)
-        
-        # 日志
-        log_group = QGroupBox("系统日志")
-        log_layout = QVBoxLayout()
-        self.log_widget = LogWidget()
-        self.log_widget.setMinimumHeight(150)
-        log_layout.addWidget(self.log_widget)
-        
-        log_btn_layout = QHBoxLayout()
-        clear_log_btn = QPushButton("清空日志")
-        clear_log_btn.clicked.connect(lambda: self.log_widget.clear())
-        log_btn_layout.addWidget(clear_log_btn)
-        
-        clear_cache_btn = QPushButton("清除模型缓存")
-        clear_cache_btn.clicked.connect(ModelManager.clear_cache)
-        log_btn_layout.addWidget(clear_cache_btn)
-        
-        refresh_models_btn = QPushButton("刷新模型状态")
-        refresh_models_btn.clicked.connect(self._refresh_all_model_selectors)
-        log_btn_layout.addWidget(refresh_models_btn)
-        
-        stop_btn = QPushButton("停止当前任务")
-        stop_btn.setObjectName("stopButton")
-        stop_btn.clicked.connect(self._stop_current_task)
-        log_btn_layout.addWidget(stop_btn)
-        
-        # 添加操作按钮到日志区域
-        self.action_btns = {}
-        
-        # 精灵图按钮
-        btn = QPushButton("生成精灵图")
-        btn.setObjectName("actionButton")
-        btn.clicked.connect(self.sprite_run)
-        self.action_btns[0] = btn
-        log_btn_layout.addWidget(btn)
-        
-        # 编辑已有精灵图按钮
-        edit_existing_btn = QPushButton("编辑已有精灵图")
-        edit_existing_btn.clicked.connect(self._edit_existing_sprite)
-        # 默认显示 (因为默认 Tab 是 0)
-        # 将其添加为特殊的 action button，或者在 tab 切换逻辑中单独处理
-        # 这里为了简单，我们把它也加入 action_btns，但 key 可以用个特殊值，或者直接在 tab 0 显示时一起显示
-        self.sprite_edit_btn = edit_existing_btn 
-        log_btn_layout.addWidget(edit_existing_btn)
-        
-        # 视频转图按钮
-        btn = QPushButton("开始提取")
-        btn.setObjectName("actionButton")
-        btn.clicked.connect(self.extract_run)
-        btn.hide()
-        self.action_btns[1] = btn
-        log_btn_layout.addWidget(btn)
-        
-        # 视频扣像按钮
-        btn = QPushButton("开始视频扣像")
-        btn.setObjectName("actionButton")
-        btn.clicked.connect(self.beiou_run)
-        btn.hide()
-        self.action_btns[2] = btn
-        log_btn_layout.addWidget(btn)
-        
-        # 图片转视频按钮
-        btn = QPushButton("合成视频")
-        btn.setObjectName("actionButton")
-        btn.clicked.connect(self.vid_run)
-        btn.hide()
-        self.action_btns[3] = btn
-        log_btn_layout.addWidget(btn)
-        
-        # 视频转GIF按钮
-        btn = QPushButton("生成 GIF")
-        btn.setObjectName("actionButton")
-        btn.clicked.connect(self.gif_run)
-        btn.hide()
-        self.action_btns[4] = btn
-        log_btn_layout.addWidget(btn)
-        
-        # 图片扣图按钮
-        btn = QPushButton("处理图片")
-        btn.setObjectName("actionButton")
-        btn.clicked.connect(self.single_run)
-        btn.hide()
-        self.action_btns[5] = btn
-        log_btn_layout.addWidget(btn)
-        
-        log_btn_layout.addStretch()
-        log_layout.addLayout(log_btn_layout)
-        
-        log_group.setLayout(log_layout)
-        self.splitter.addWidget(log_group)
-        
-        self.splitter.setSizes([500, 200])
-        main.addWidget(self.splitter)
-        
-        self.setLayout(main)
-        self._apply_compact_layout()
-        self._adjust_window_size()
-        
-        # 监听 Tab 切换
-        self.tabs.currentChanged.connect(self._on_tab_changed)
-        
-        # 初始化调用一次，确保按钮状态正确
-        self._on_tab_changed(self.tabs.currentIndex())
-
-    def _on_tab_changed(self, index):
-        """Tab 切换时显示对应的操作按钮"""
-        for i, btn in self.action_btns.items():
-            if i == index:
-                btn.show()
-            else:
-                btn.hide()
-        
-        # 特殊处理编辑已有精灵图按钮
-        # 强制更新可见性，确保在任何时候切换回来都能显示
-        if index == 0:
-            self.sprite_edit_btn.setVisible(True)
-            self.sprite_edit_btn.raise_() # 确保在最上层
-        else:
-            self.sprite_edit_btn.setVisible(False)
-        
-        self._adjust_splitter_to_tab()
-
-    def _compact_set_width(self, widget, chars):
-        try:
-            from PySide6.QtWidgets import QStyle, QSpinBox, QDoubleSpinBox, QComboBox, QLineEdit
-            fm = widget.fontMetrics()
-            txt_w = fm.horizontalAdvance('0' * max(1, int(chars)))
-            extra = 10
-            try:
-                frame_w = widget.style().pixelMetric(QStyle.PM_DefaultFrameWidth, None, widget)
-            except Exception:
-                frame_w = 2
-            if isinstance(widget, QSpinBox):
-                extra += frame_w + 28
-            elif isinstance(widget, QDoubleSpinBox):
-                extra += frame_w + 32
-            elif isinstance(widget, QComboBox):
-                extra += frame_w + 28
-            elif isinstance(widget, QLineEdit):
-                extra += frame_w + 10
-            widget.setMaximumWidth(txt_w + extra)
-        except Exception:
-            pass
-
-    def _apply_compact_layout(self):
-        self._compact_set_width(self.sprite_path_edit, 36)
-        self._compact_set_width(self.extract_path_edit, 36)
-        self._compact_set_width(self.vid_src_edit, 36)
-        self._compact_set_width(self.gif_src_edit, 36)
-        self._compact_set_width(self.single_src_edit, 36)
-        self.sprite_step.setRange(1, 99)
-        self.extract_step.setRange(1, 99)
-        self.gif_step.setRange(1, 99)
-        self._compact_set_width(self.sprite_step, 2)
-        self._compact_set_width(self.extract_step, 2)
-        self._compact_set_width(self.gif_step, 2)
-        self.sprite_scale_val.setRange(0, 100)
-        self._compact_set_width(self.sprite_scale_val, 3)
-        self._compact_set_width(self.sprite_w, 4)
-        self._compact_set_width(self.sprite_h, 4)
-        self._compact_set_width(self.sprite_cols, 2)
-        self._compact_set_width(self.beiou_crf, 2)
-        self._compact_set_width(self.vid_fps, 3)
-        self._compact_set_width(self.gif_fps, 2)
-        self._compact_set_width(self.beiou_format, 18)
-        self._compact_set_width(self.beiou_speed, 6)
-
-        # 紧凑化各栅格布局的间距，减少标签与控件间空白
-        try:
-            # 精灵图设置
-            sl = self._find_layout_of_group("设置")
-            if sl:
-                sl.setContentsMargins(6, 6, 6, 6)
-                sl.setHorizontalSpacing(6)
-                sl.setVerticalSpacing(4)
-                sl.setColumnStretch(0, 0); sl.setColumnStretch(1, 0); sl.setColumnStretch(2, 0); sl.setColumnStretch(3, 1)
-            # 视频转图 - 选项与清理
-            ol = self._find_layout_of_group("提取选项")
-            if ol:
-                ol.setContentsMargins(6, 6, 6, 6)
-                ol.setHorizontalSpacing(6)
-                ol.setVerticalSpacing(4)
-            cl = self._find_layout_of_group("清理选项")
-            if cl:
-                cl.setContentsMargins(6, 6, 6, 6)
-                cl.setHorizontalSpacing(6)
-                cl.setVerticalSpacing(4)
-            # 视频扣像 - 后处理
-            pl = self._find_layout_of_group("后处理选项")
-            if pl:
-                pl.setContentsMargins(6, 6, 6, 6)
-                pl.setHorizontalSpacing(6)
-                pl.setVerticalSpacing(4)
-            # 图片转视频参数
-            iv = self._find_layout_of_group("参数")
-            if iv:
-                iv.setContentsMargins(6, 6, 6, 6)
-                iv.setHorizontalSpacing(6)
-                iv.setVerticalSpacing(4)
-            # GIF 参数与清理
-            gf = self._find_layout_of_group("GIF 参数")
-            if gf:
-                gf.setContentsMargins(6, 6, 6, 6)
-                gf.setHorizontalSpacing(6)
-                gf.setVerticalSpacing(4)
-            gc = self._find_layout_of_group("清理选项")
-            if gc:
-                gc.setContentsMargins(6, 6, 6, 6)
-                gc.setHorizontalSpacing(6)
-                gc.setVerticalSpacing(4)
-            # 单图处理选项
-            so = self._find_layout_of_group("处理选项")
-            if so:
-                so.setContentsMargins(6, 6, 6, 6)
-                so.setHorizontalSpacing(6)
-                so.setVerticalSpacing(4)
-        except Exception:
-            pass
-
-    def _adjust_window_size(self):
-        try:
-            max_h = 0
-            for i in range(self.tabs.count()):
-                w = self.tabs.widget(i)
-                max_h = max(max_h, w.sizeHint().height())
-            logs_min = 160
-            total_h = max_h + logs_min + 20
-            self.setFixedHeight(750)
-        except Exception:
-            pass
-
-    def _adjust_splitter_to_tab(self):
-        try:
-            top_h = self.tabs.currentWidget().sizeHint().height()
-            total_h = self.height()
-            logs_h = max(140, total_h - top_h)
-            self.splitter.setSizes([top_h, logs_h])
-        except Exception:
-            pass
-
-    def _find_layout_of_group(self, title):
-        try:
-            # 在当前页中查找指定标题的 QGroupBox 并返回其布局
-            page = self.tabs.currentWidget()
-            for gb in page.findChildren(QGroupBox):
-                if gb.title() == title:
-                    return gb.layout()
-        except Exception:
-            pass
-        return None
-    
-    def _refresh_all_model_selectors(self):
-        """刷新所有模型选择器"""
-        ModelManager.scan_models()
-        for selector in [self.sprite_model, self.extract_model, self.gif_model, self.single_model, self.beiou_model]:
-            selector.refresh_models()
-        logger.info("模型状态已刷新")
-
-    def create_file_input(self, btn_callback, placeholder="拖入文件或点击选择..."):
-        layout = QHBoxLayout()
-        line_edit = FileDropLineEdit(placeholder=placeholder)
-        btn = QPushButton("选择")
-        btn.clicked.connect(btn_callback)
-        layout.addWidget(line_edit)
-        layout.addWidget(btn)
-        return layout, line_edit
-
-    def create_hint_label(self, text):
-        label = QLabel(text)
-        label.setStyleSheet("color: #7f8c8d; font-size: 8pt; font-style: italic;")
-        label.setWordWrap(True)
-        return label
-
-    def create_thread_selector(self):
-        spin = QSpinBox()
-        spin.setRange(1, HardwareInfo.cpu_threads * 2)
-        spin.setValue(min(4, HardwareInfo.cpu_threads))
-        return spin
-
-    def _on_model_changed(self, model_id: str, status: dict):
-        """模型选择变化回调"""
-        pass
-
-    def _build_sprite_tab(self):
-        w = QWidget()
-        layout = QVBoxLayout()
-        
-        src_grp = QGroupBox("源文件")
-        self.sprite_source_type = QButtonGroup(w)
-        r1 = QRadioButton("视频"); r1.setChecked(True)
-        r2 = QRadioButton("图片文件夹")
-        r3 = QRadioButton("已有精灵图")
-        self.sprite_source_type.addButton(r1, 0)
-        self.sprite_source_type.addButton(r2, 1)
-        self.sprite_source_type.addButton(r3, 2)
-        
-        hl = QHBoxLayout()
-        hl.addWidget(r1)
-        hl.addWidget(r2)
-        hl.addWidget(r3)
-        hl.addStretch()
-        src_grp.setLayout(QVBoxLayout())
-        src_grp.layout().addLayout(hl)
-        
-        inp_layout, self.sprite_path_edit = self.create_file_input(self.sprite_select_source)
-        src_grp.layout().addLayout(inp_layout)
-        layout.addWidget(src_grp)
-
-        model_grp = QGroupBox("AI 模型")
-        model_grp.setFixedHeight(60)  # 强制限制高度
-        ml = QGridLayout()
-        ml.setContentsMargins(6,6,6,6)
-        ml.setHorizontalSpacing(6)
-        ml.setVerticalSpacing(4)
-        ml.addWidget(QLabel("选择模型:"), 0, 0)
-        self.sprite_model = ModelSelector()
-        self.sprite_model.model_changed.connect(self._on_model_changed)
-        ml.addWidget(self.sprite_model, 0, 1, 1, 2)
-        ml.addWidget(QLabel("并行线程:"), 0, 3)
-        self.sprite_threads = self.create_thread_selector()
-        ml.addWidget(self.sprite_threads, 0, 4)
-        
-        model_grp.setToolTip("★ = 已加载 | ✓ = 已下载 | ○ = 需下载 | 🔴 = 大模型")
-        model_grp.setLayout(ml)
-        layout.addWidget(model_grp)
-
-        set_grp = QGroupBox("设置")
-        set_grp.setFixedHeight(60)
-        sl = QGridLayout()
-        sl.setContentsMargins(6, 6, 6, 6)
-        sl.setHorizontalSpacing(6)
-        sl.setVerticalSpacing(4)
-        sl.addWidget(QLabel("帧间隔:"), 0, 0)
-        self.sprite_step = QSpinBox()
-        self.sprite_step.setRange(1, 1000)
-        self.sprite_step.setValue(1)
-        sl.addWidget(self.sprite_step, 0, 1)
-        sl.addWidget(QLabel("列数:"), 0, 2)
-        self.sprite_cols = QSpinBox()
-        self.sprite_cols.setRange(1, 100)
-        self.sprite_cols.setValue(10)
-        sl.addWidget(self.sprite_cols, 0, 3)
-        
-        self.sprite_percent = QRadioButton("百分比")
-        self.sprite_percent.setChecked(True)
-        self.sprite_fixed = QRadioButton("固定尺寸")
-        sl.addWidget(self.sprite_percent, 0, 4)
-        sl.addWidget(self.sprite_fixed, 0, 5)
-        
-        self.sprite_scale_val = QDoubleSpinBox()
-        self.sprite_scale_val.setValue(100)
-        self.sprite_scale_val.setRange(1, 1000)
-        sl.addWidget(self.sprite_scale_val, 0, 6)
-        
-        self.sprite_w = QSpinBox()
-        self.sprite_w.setValue(256)
-        self.sprite_w.setRange(1, 4096)
-        self.sprite_w.setEnabled(False)
-        self.sprite_h = QSpinBox()
-        self.sprite_h.setValue(256)
-        self.sprite_h.setRange(1, 4096)
-        self.sprite_h.setEnabled(False)
-        
-        wh_layout = QHBoxLayout()
-        wh_layout.addWidget(self.sprite_w)
-        wh_layout.addWidget(QLabel("x"))
-        wh_layout.addWidget(self.sprite_h)
-        sl.addLayout(wh_layout, 0, 7)
-        
-        self.sprite_percent.toggled.connect(lambda c: [self.sprite_w.setEnabled(not c), self.sprite_h.setEnabled(not c), self.sprite_scale_val.setEnabled(c)])
-
-        set_grp.setLayout(sl)
-        layout.addWidget(set_grp)
-        
-        bg_grp = QGroupBox("背景移除与清理")
-        bl = QGridLayout()
-        bl.setContentsMargins(6, 6, 6, 6)
-        bl.setHorizontalSpacing(6)
-        bl.setVerticalSpacing(4)
-        
-        self.sprite_rembg = QCheckBox("启用背景移除")
-        bl.addWidget(self.sprite_rembg, 0, 0, 1, 2)
-        bl.addItem(QSpacerItem(40, 1, QSizePolicy.Fixed, QSizePolicy.Minimum), 0, 2)
-        
-        bl.addWidget(QLabel("清理预设:"), 0, 3)
-        self.sprite_clean_preset = QComboBox()
-        self.sprite_clean_preset.addItems(["关闭", "轻度", "标准", "强力", "自定义"])
-        self.sprite_clean_preset.setCurrentText("标准")
-        bl.addWidget(self.sprite_clean_preset, 0, 4)
-        
-        self.sprite_clean = QCheckBox("边缘清理")
-        self.sprite_clean.setEnabled(False)
-        bl.addWidget(self.sprite_clean, 0, 5)
-        bl.addWidget(QLabel("腐蚀:"), 0, 6)
-        self.sprite_feather = QSpinBox()
-        self.sprite_feather.setValue(1)
-        self.sprite_feather.setRange(0, 10)
-        bl.addWidget(self.sprite_feather, 0, 7)
-        bl.addWidget(QLabel("模糊:"), 0, 8)
-        self.sprite_blur = QSpinBox()
-        self.sprite_blur.setValue(1)
-        self.sprite_blur.setRange(0, 10)
-        bl.addWidget(self.sprite_blur, 0, 9)
-        bl.addWidget(QLabel("Gamma:"), 0, 10)
-        self.sprite_gamma = QDoubleSpinBox()
-        self.sprite_gamma.setValue(1.2)
-        self.sprite_gamma.setRange(0.5, 2.0)
-        self.sprite_gamma.setSingleStep(0.1)
-        bl.addWidget(self.sprite_gamma, 0, 11)
-        
-        self.sprite_iso = QCheckBox("移除孤立色块")
-        self.sprite_iso.setEnabled(False)
-        bl.addWidget(self.sprite_iso, 1, 0, 1, 2)
-        bl.addWidget(QLabel("最小保留:"), 1, 2)
-        self.sprite_iso_area = QSpinBox()
-        self.sprite_iso_area.setValue(50)
-        self.sprite_iso_area.setRange(1, 50000)
-        bl.addWidget(self.sprite_iso_area, 1, 3)
-        
-        self.sprite_internal = QCheckBox("清理内部孔洞")
-        self.sprite_internal.setEnabled(False)
-        self.sprite_internal.setChecked(True)
-        bl.addWidget(self.sprite_internal, 1, 4, 1, 2)
-        bl.addWidget(QLabel("孔洞最大:"), 1, 6)
-        self.sprite_internal_area = QSpinBox()
-        self.sprite_internal_area.setValue(100)
-        self.sprite_internal_area.setRange(1, 10000)
-        bl.addWidget(self.sprite_internal_area, 1, 7)
-        
-        def _apply_preset(name: str):
-            if name == "关闭":
-                self.sprite_clean.setChecked(False)
-                self.sprite_iso.setChecked(False)
-                self.sprite_internal.setChecked(False)
-                self.sprite_feather.setValue(0)
-                self.sprite_blur.setValue(0)
-                self.sprite_gamma.setValue(1.0)
-                self.sprite_iso_area.setValue(10)
-                self.sprite_internal_area.setValue(50)
-                for w in [self.sprite_feather, self.sprite_blur, self.sprite_gamma, self.sprite_iso_area, self.sprite_internal_area]:
-                    w.setEnabled(False)
-            elif name == "轻度":
-                self.sprite_clean.setChecked(True)
-                self.sprite_iso.setChecked(True)
-                self.sprite_internal.setChecked(True)
-                self.sprite_feather.setValue(1)
-                self.sprite_blur.setValue(1)
-                self.sprite_gamma.setValue(1.0)
-                self.sprite_iso_area.setValue(20)
-                self.sprite_internal_area.setValue(80)
-                for w in [self.sprite_feather, self.sprite_blur, self.sprite_gamma, self.sprite_iso_area, self.sprite_internal_area]:
-                    w.setEnabled(False)
-            elif name == "标准":
-                self.sprite_clean.setChecked(True)
-                self.sprite_iso.setChecked(True)
-                self.sprite_internal.setChecked(True)
-                self.sprite_feather.setValue(1)
-                self.sprite_blur.setValue(1)
-                self.sprite_gamma.setValue(1.2)
-                self.sprite_iso_area.setValue(50)
-                self.sprite_internal_area.setValue(100)
-                for w in [self.sprite_feather, self.sprite_blur, self.sprite_gamma, self.sprite_iso_area, self.sprite_internal_area]:
-                    w.setEnabled(False)
-            elif name == "强力":
-                self.sprite_clean.setChecked(True)
-                self.sprite_iso.setChecked(True)
-                self.sprite_internal.setChecked(True)
-                self.sprite_feather.setValue(2)
-                self.sprite_blur.setValue(2)
-                self.sprite_gamma.setValue(1.3)
-                self.sprite_iso_area.setValue(150)
-                self.sprite_internal_area.setValue(200)
-                for w in [self.sprite_feather, self.sprite_blur, self.sprite_gamma, self.sprite_iso_area, self.sprite_internal_area]:
-                    w.setEnabled(False)
-            else:  # 自定义
-                self.sprite_clean.setChecked(True)
-                self.sprite_iso.setChecked(True)
-                self.sprite_internal.setChecked(True)
-                for w in [self.sprite_feather, self.sprite_blur, self.sprite_gamma, self.sprite_iso_area, self.sprite_internal_area]:
-                    w.setEnabled(True)
-        
-        self.sprite_clean_preset.currentTextChanged.connect(_apply_preset)
-        
-        def _on_sprite_rembg_toggled(checked):
-            self.sprite_clean_preset.setEnabled(checked)
-            self.sprite_clean.setEnabled(checked)
-            self.sprite_iso.setEnabled(checked)
-            self.sprite_internal.setEnabled(checked)
-            
-            if not checked:
-                # 禁用所有数值控件
-                for w in [self.sprite_feather, self.sprite_blur, self.sprite_gamma, self.sprite_iso_area, self.sprite_internal_area]:
-                    w.setEnabled(False)
-            else:
-                # 恢复预设状态 (如果是自定义则启用，否则禁用)
-                _apply_preset(self.sprite_clean_preset.currentText())
-
-        self.sprite_rembg.toggled.connect(_on_sprite_rembg_toggled)
-        # 初始化状态
-        _on_sprite_rembg_toggled(self.sprite_rembg.isChecked())
-        # 确保应用预设值
-        _apply_preset(self.sprite_clean_preset.currentText())
-        
-        bg_grp.setLayout(bl)
-        layout.addWidget(bg_grp)
-
-        edit_grp = QGroupBox("编辑模式")
-        edit_grp.setFixedHeight(75)  # 2.5行文本高度
-        el = QVBoxLayout()
-        hdr = QHBoxLayout()
-        self.sprite_edit_mode = QCheckBox("启用编辑模式 (生成后可选择帧)")
-        hdr.addWidget(self.sprite_edit_mode)
-        el.addLayout(hdr)
-        edit_hint = self.create_hint_label("启用后，生成精灵图前会打开编辑器，可以选择要保留的帧。输出文件会添加 _bj 后缀。")
-        el.addWidget(edit_hint)
-        edit_grp.setLayout(el)
-        layout.addWidget(edit_grp)
-        
-        self.sprite_prog = QProgressBar()
-        layout.addWidget(self.sprite_prog)
-        w.setLayout(layout)
-        return w
-
-    def _build_video_extract_tab(self):
-        w = QWidget()
-        layout = QVBoxLayout()
-        
-        grp = QGroupBox("视频源")
-        grp.setFixedHeight(60)
-        l, self.extract_path_edit = self.create_file_input(self.extract_select)
-        l.setContentsMargins(6,6,6,6)
-        l.setSpacing(6)
-        grp.setLayout(l)
-        layout.addWidget(grp)
-        
-        model_grp = QGroupBox("AI 模型")
-        model_grp.setFixedHeight(60)  # 强制限制高度
-        ml = QGridLayout()
-        ml.setContentsMargins(6,6,6,6)
-        ml.setHorizontalSpacing(6)
-        ml.setVerticalSpacing(4)
-        ml.addWidget(QLabel("选择模型:"), 0, 0)
-        self.extract_model = ModelSelector()
-        self.extract_model.model_changed.connect(self._on_model_changed)
-        ml.addWidget(self.extract_model, 0, 1, 1, 2)
-        ml.addWidget(QLabel("并行线程:"), 0, 3)
-        self.extract_threads = self.create_thread_selector()
-        ml.addWidget(self.extract_threads, 0, 4)
-        model_grp.setLayout(ml)
-        layout.addWidget(model_grp)
-        
-        opt = QGroupBox("提取选项")
-        opt.setFixedHeight(90)  # 3行文本高度
-        ol = QGridLayout()
-        self.extract_mode = QButtonGroup(w)
-        r1 = QRadioButton("首尾帧")
-        r1.setChecked(True)
-        self.extract_mode.addButton(r1, 0)
-        r2 = QRadioButton("全部帧")
-        self.extract_mode.addButton(r2, 1)
-        ol.addWidget(r1, 0, 0)
-        ol.addWidget(r2, 0, 1)
-        ol.addWidget(QLabel("间隔:"), 0, 2)
-        self.extract_step = QSpinBox()
-        self.extract_step.setRange(1, 1000)
-        self.extract_step.setValue(1)
-        ol.addWidget(self.extract_step, 0, 3)
-        
-        # 背景图路径控件移动到间隔控件后面
-        self.extract_bg_img = QLineEdit("背景图路径...")
-        ol.addWidget(self.extract_bg_img, 0, 4, 1, 2)
-
-        self.extract_rembg = QCheckBox("移除背景")
-        ol.addWidget(self.extract_rembg, 1, 0)
-        self.extract_bg_type = QComboBox()
-        self.extract_bg_type.addItems(["none", "color", "image"])
-        ol.addWidget(self.extract_bg_type, 1, 1)
-        
-        # 【修复】使用颜色选择器
-        ol.addWidget(QLabel("背景色:"), 1, 2)
-        self.extract_bg_color = ColorPickerWidget("#FFFFFF")
-        ol.addWidget(self.extract_bg_color, 1, 3)
-        
-        opt.setLayout(ol)
-        layout.addWidget(opt)
-        
-        clean_grp = QGroupBox("清理选项")
-        clean_grp.setFixedHeight(115)  # 增加5px (110 -> 115)
-        cl = QGridLayout()
-        
-        self.extract_clean = QCheckBox("边缘清理")
-        cl.addWidget(self.extract_clean, 0, 0)
-        cl.addWidget(QLabel("腐蚀:"), 0, 1)
-        self.extract_feather = QSpinBox()
-        self.extract_feather.setValue(1)
-        self.extract_feather.setRange(0, 10)
-        cl.addWidget(self.extract_feather, 0, 2)
-        cl.addWidget(QLabel("模糊:"), 0, 3)
-        self.extract_blur = QSpinBox()
-        self.extract_blur.setValue(1)
-        self.extract_blur.setRange(0, 10)
-        cl.addWidget(self.extract_blur, 0, 4)
-        cl.addWidget(QLabel("Gamma:"), 0, 5)
-        self.extract_gamma = QDoubleSpinBox()
-        self.extract_gamma.setValue(1.2)
-        self.extract_gamma.setRange(0.5, 2.0)
-        self.extract_gamma.setSingleStep(0.1)
-        cl.addWidget(self.extract_gamma, 0, 6)
-        cl.addWidget(QLabel("清理预设:"), 0, 7)
-        self.extract_clean_preset = QComboBox()
-        self.extract_clean_preset.addItems(["关闭", "轻度", "标准", "强力", "自定义"])
-        self.extract_clean_preset.setCurrentText("标准")
-        cl.addWidget(self.extract_clean_preset, 0, 8)
-        
-        self.extract_iso = QCheckBox("移除孤立色块")
-        cl.addWidget(self.extract_iso, 1, 0)
-        cl.addWidget(QLabel("最小保留:"), 1, 1)
-        self.extract_iso_area = QSpinBox()
-        self.extract_iso_area.setValue(50)
-        self.extract_iso_area.setRange(1, 50000)
-        cl.addWidget(self.extract_iso_area, 1, 2)
-        
-        self.extract_internal = QCheckBox("清理内部孔洞")
-        self.extract_internal.setChecked(True)
-        cl.addWidget(self.extract_internal, 1, 3)
-        cl.addWidget(QLabel("孔洞最大:"), 1, 4)
-        self.extract_internal_area = QSpinBox()
-        self.extract_internal_area.setValue(100)
-        self.extract_internal_area.setRange(1, 10000)
-        cl.addWidget(self.extract_internal_area, 1, 5)
-        def _apply_extract_preset(name: str):
-            if name == "关闭":
-                self.extract_clean.setChecked(False)
-                self.extract_iso.setChecked(False)
-                self.extract_internal.setChecked(False)
-                self.extract_feather.setValue(0)
-                self.extract_blur.setValue(0)
-                self.extract_gamma.setValue(1.0)
-                self.extract_iso_area.setValue(10)
-                self.extract_internal_area.setValue(50)
-                for w in [self.extract_feather, self.extract_blur, self.extract_gamma, self.extract_iso_area, self.extract_internal_area]:
-                    w.setEnabled(False)
-            elif name == "轻度":
-                self.extract_clean.setChecked(True)
-                self.extract_iso.setChecked(True)
-                self.extract_internal.setChecked(True)
-                self.extract_feather.setValue(1)
-                self.extract_blur.setValue(1)
-                self.extract_gamma.setValue(1.0)
-                self.extract_iso_area.setValue(20)
-                self.extract_internal_area.setValue(80)
-                for w in [self.extract_feather, self.extract_blur, self.extract_gamma, self.extract_iso_area, self.extract_internal_area]:
-                    w.setEnabled(False)
-            elif name == "标准":
-                self.extract_clean.setChecked(True)
-                self.extract_iso.setChecked(True)
-                self.extract_internal.setChecked(True)
-                self.extract_feather.setValue(1)
-                self.extract_blur.setValue(1)
-                self.extract_gamma.setValue(1.2)
-                self.extract_iso_area.setValue(50)
-                self.extract_internal_area.setValue(100)
-                for w in [self.extract_feather, self.extract_blur, self.extract_gamma, self.extract_iso_area, self.extract_internal_area]:
-                    w.setEnabled(False)
-            elif name == "强力":
-                self.extract_clean.setChecked(True)
-                self.extract_iso.setChecked(True)
-                self.extract_internal.setChecked(True)
-                self.extract_feather.setValue(2)
-                self.extract_blur.setValue(2)
-                self.extract_gamma.setValue(1.3)
-                self.extract_iso_area.setValue(150)
-                self.extract_internal_area.setValue(200)
-                for w in [self.extract_feather, self.extract_blur, self.extract_gamma, self.extract_iso_area, self.extract_internal_area]:
-                    w.setEnabled(False)
-            else:
-                self.extract_clean.setChecked(True)
-                self.extract_iso.setChecked(True)
-                self.extract_internal.setChecked(True)
-                for w in [self.extract_feather, self.extract_blur, self.extract_gamma, self.extract_iso_area, self.extract_internal_area]:
-                    w.setEnabled(True)
-        self.extract_clean_preset.currentTextChanged.connect(_apply_extract_preset)
-        
-        def _on_extract_rembg_toggled(checked):
-            self.extract_clean_preset.setEnabled(checked)
-            self.extract_clean.setEnabled(checked)
-            self.extract_iso.setEnabled(checked)
-            self.extract_internal.setEnabled(checked)
-            
-            if not checked:
-                for w in [self.extract_feather, self.extract_blur, self.extract_gamma, self.extract_iso_area, self.extract_internal_area]:
-                    w.setEnabled(False)
-            else:
-                _apply_extract_preset(self.extract_clean_preset.currentText())
-                
-        self.extract_rembg.toggled.connect(_on_extract_rembg_toggled)
-        _on_extract_rembg_toggled(self.extract_rembg.isChecked())
-        _apply_extract_preset(self.extract_clean_preset.currentText())
-        
-        clean_grp.setLayout(cl)
-        layout.addWidget(clean_grp)
-        
-        self.extract_prog = QProgressBar()
-        layout.addWidget(self.extract_prog)
-        w.setLayout(layout)
-        return w
-
-    def _build_video_rembg_tab(self):
-        """视频扣像 Tab"""
-        w = QWidget()
-        layout = QVBoxLayout()
-        
-        src_grp = QGroupBox("视频源")
-        src_grp.setFixedHeight(60)
-        l, self.beiou_path_edit = self.create_file_input(self.beiou_select)
-        l.setContentsMargins(6,6,6,6)
-        l.setSpacing(6)
-        src_grp.setLayout(l)
-        layout.addWidget(src_grp)
-        
-        model_grp = QGroupBox("AI 模型")
-        model_grp.setFixedHeight(60)  # 强制限制高度
-        ml = QGridLayout()
-        ml.setContentsMargins(6,6,6,6)
-        ml.setHorizontalSpacing(6)
-        ml.setVerticalSpacing(4)
-        ml.addWidget(QLabel("选择模型:"), 0, 0)
-        self.beiou_model = ModelSelector()
-        self.beiou_model.model_changed.connect(self._on_model_changed)
-        ml.addWidget(self.beiou_model, 0, 1, 1, 2)
-        ml.addWidget(QLabel("并行线程:"), 0, 3)
-        self.beiou_threads = self.create_thread_selector()
-        ml.addWidget(self.beiou_threads, 0, 4)
-        model_grp.setToolTip("建议使用 ISNet 或 U²-Net 系列模型")
-        model_grp.setLayout(ml)
-        layout.addWidget(model_grp)
-        
-        out_grp = QGroupBox("输出设置")
-        out_grp.setFixedHeight(150)  # 5行文本高度
-        ol = QGridLayout()
-        ol.setContentsMargins(8, 8, 8, 8)
-        ol.setHorizontalSpacing(8)
-        ol.setVerticalSpacing(6)
-        
-        ol.addWidget(QLabel("输出格式:"), 0, 0)
-        self.beiou_format = QComboBox()
-        self.beiou_format.setSizeAdjustPolicy(QComboBox.AdjustToContents)
-        self.beiou_format.setMinimumContentsLength(12)
-        self.beiou_format.addItems(["mp4 (绿幕/自定义背景)", "avi", "webm (绿幕)", "webm (透明通道)"])
-        ol.addWidget(self.beiou_format, 0, 1)
-        
-        # 【修复】使用颜色选择器
-        ol.addWidget(QLabel("背景色:"), 0, 2)
-        self.beiou_bg_color = ColorPickerWidget("#00FF00")
-        self.beiou_bg_color.setMaximumWidth(180)
-        ol.addWidget(self.beiou_bg_color, 0, 3)
-        self.beiou_preserve_alpha = QCheckBox("保留透明通道 (仅WebM)")
-        self.beiou_preserve_alpha.setEnabled(False)
-        ol.addWidget(self.beiou_preserve_alpha, 1, 0, 1, 2)
-        ol.addWidget(QLabel("质量(CRF):"), 1, 2)
-        self.beiou_crf = QSpinBox()
-        self.beiou_crf.setRange(12, 40)
-        self.beiou_crf.setValue(28)
-        ol.addWidget(self.beiou_crf, 1, 3)
-        ol.addWidget(QLabel("速度模式:"), 2, 0)
-        self.beiou_speed = QComboBox()
-        self.beiou_speed.setSizeAdjustPolicy(QComboBox.AdjustToContents)
-        self.beiou_speed.addItems(["快速", "平衡", "高质量"])
-        self.beiou_speed.setCurrentIndex(1)
-        ol.addWidget(self.beiou_speed, 2, 1)
-        self.beiou_audio = QCheckBox("包含音频 (透明WebM)")
-        self.beiou_audio.setEnabled(False)
-        self.beiou_audio.setChecked(True)
-        ol.addWidget(self.beiou_audio, 2, 2, 1, 2)
-        self.beiou_format.currentIndexChanged.connect(self._on_beiou_format_changed)
-        format_hint = self.create_hint_label("选择'webm (透明通道)'可保存带Alpha通道的视频，适合后期合成")
-        ol.addWidget(format_hint, 4, 0, 1, 4)
-
-        ol.setColumnStretch(1, 1)
-        ol.setColumnStretch(3, 1)
-        
-        out_grp.setLayout(ol)
-        layout.addWidget(out_grp)
-        
-        post_grp = QGroupBox("后处理选项")
-        post_grp.setFixedHeight(90)
-        pl = QGridLayout()
-        
-        self.beiou_clean = QCheckBox("边缘清理")
-        pl.addWidget(self.beiou_clean, 0, 0)
-        pl.addWidget(QLabel("腐蚀:"), 0, 1)
-        self.beiou_feather = QSpinBox()
-        self.beiou_feather.setValue(1)
-        self.beiou_feather.setRange(0, 10)
-        pl.addWidget(self.beiou_feather, 0, 2)
-        pl.addWidget(QLabel("模糊:"), 0, 3)
-        self.beiou_blur = QSpinBox()
-        self.beiou_blur.setValue(1)
-        self.beiou_blur.setRange(0, 10)
-        pl.addWidget(self.beiou_blur, 0, 4)
-        pl.addWidget(QLabel("Gamma:"), 0, 5)
-        self.beiou_gamma = QDoubleSpinBox()
-        self.beiou_gamma.setValue(1.2)
-        self.beiou_gamma.setRange(0.5, 2.0)
-        self.beiou_gamma.setSingleStep(0.1)
-        pl.addWidget(self.beiou_gamma, 0, 6)
-        pl.addWidget(QLabel("清理预设:"), 0, 7)
-        self.beiou_clean_preset = QComboBox()
-        self.beiou_clean_preset.addItems(["关闭", "轻度", "标准", "强力", "自定义"])
-        self.beiou_clean_preset.setCurrentText("标准")
-        pl.addWidget(self.beiou_clean_preset, 0, 8)
-        
-        self.beiou_iso = QCheckBox("移除孤立色块")
-        pl.addWidget(self.beiou_iso, 1, 0)
-        pl.addWidget(QLabel("最小保留:"), 1, 1)
-        self.beiou_iso_area = QSpinBox()
-        self.beiou_iso_area.setValue(50)
-        self.beiou_iso_area.setRange(1, 50000)
-        pl.addWidget(self.beiou_iso_area, 1, 2)
-        
-        self.beiou_internal = QCheckBox("清理内部孔洞")
-        self.beiou_internal.setChecked(True)
-        pl.addWidget(self.beiou_internal, 1, 3)
-        pl.addWidget(QLabel("孔洞最大:"), 1, 4)
-        self.beiou_internal_area = QSpinBox()
-        self.beiou_internal_area.setValue(100)
-        self.beiou_internal_area.setRange(1, 10000)
-        pl.addWidget(self.beiou_internal_area, 1, 5)
-        def _apply_beiou_preset(name: str):
-            if name == "关闭":
-                self.beiou_clean.setChecked(False)
-                self.beiou_iso.setChecked(False)
-                self.beiou_internal.setChecked(False)
-                self.beiou_feather.setValue(0)
-                self.beiou_blur.setValue(0)
-                self.beiou_gamma.setValue(1.0)
-                self.beiou_iso_area.setValue(10)
-                self.beiou_internal_area.setValue(50)
-                for w in [self.beiou_feather, self.beiou_blur, self.beiou_gamma, self.beiou_iso_area, self.beiou_internal_area]:
-                    w.setEnabled(False)
-            elif name == "轻度":
-                self.beiou_clean.setChecked(True)
-                self.beiou_iso.setChecked(True)
-                self.beiou_internal.setChecked(True)
-                self.beiou_feather.setValue(1)
-                self.beiou_blur.setValue(1)
-                self.beiou_gamma.setValue(1.0)
-                self.beiou_iso_area.setValue(20)
-                self.beiou_internal_area.setValue(80)
-                for w in [self.beiou_feather, self.beiou_blur, self.beiou_gamma, self.beiou_iso_area, self.beiou_internal_area]:
-                    w.setEnabled(False)
-            elif name == "标准":
-                self.beiou_clean.setChecked(True)
-                self.beiou_iso.setChecked(True)
-                self.beiou_internal.setChecked(True)
-                self.beiou_feather.setValue(1)
-                self.beiou_blur.setValue(1)
-                self.beiou_gamma.setValue(1.2)
-                self.beiou_iso_area.setValue(50)
-                self.beiou_internal_area.setValue(100)
-                for w in [self.beiou_feather, self.beiou_blur, self.beiou_gamma, self.beiou_iso_area, self.beiou_internal_area]:
-                    w.setEnabled(False)
-            elif name == "强力":
-                self.beiou_clean.setChecked(True)
-                self.beiou_iso.setChecked(True)
-                self.beiou_internal.setChecked(True)
-                self.beiou_feather.setValue(2)
-                self.beiou_blur.setValue(2)
-                self.beiou_gamma.setValue(1.3)
-                self.beiou_iso_area.setValue(150)
-                self.beiou_internal_area.setValue(200)
-                for w in [self.beiou_feather, self.beiou_blur, self.beiou_gamma, self.beiou_iso_area, self.beiou_internal_area]:
-                    w.setEnabled(False)
-            else:
-                self.beiou_clean.setChecked(True)
-                self.beiou_iso.setChecked(True)
-                self.beiou_internal.setChecked(True)
-                for w in [self.beiou_feather, self.beiou_blur, self.beiou_gamma, self.beiou_iso_area, self.beiou_internal_area]:
-                    w.setEnabled(True)
-        self.beiou_clean_preset.currentTextChanged.connect(_apply_beiou_preset)
-        _apply_beiou_preset(self.beiou_clean_preset.currentText())
-        
-        post_grp.setLayout(pl)
-        layout.addWidget(post_grp)
-        
-        self.beiou_prog = QProgressBar()
-        layout.addWidget(self.beiou_prog)
-        w.setLayout(layout)
-        return w
-
-    def _build_images_to_video_tab(self):
-        w = QWidget()
-        layout = QVBoxLayout()
-        
-        grp = QGroupBox("图片源")
-        grp.setFixedHeight(60)
-        l, self.vid_src_edit = self.create_file_input(self.vid_select)
-        grp.setLayout(l)
-        layout.addWidget(grp)
-        
-        opt = QGroupBox("参数")
-        ol = QGridLayout()
-        ol.addWidget(QLabel("FPS:"), 0, 0)
-        self.vid_fps = QSpinBox()
-        self.vid_fps.setValue(24)
-        self.vid_fps.setRange(1, 120)
-        ol.addWidget(self.vid_fps, 0, 1)
-        ol.addWidget(QLabel("背景填充:"), 0, 2)
-        self.vid_bg_type = QComboBox()
-        self.vid_bg_type.addItems(["none", "color", "image"])
-        ol.addWidget(self.vid_bg_type, 0, 3)
-        
-        # 【修复】使用颜色选择器
-        ol.addWidget(QLabel("背景色:"), 1, 0)
-        self.vid_bg_color = ColorPickerWidget("#FFFFFF")
-        ol.addWidget(self.vid_bg_color, 1, 1, 1, 3)
-        
-        opt.setLayout(ol)
-        layout.addWidget(opt)
-        
-        self.vid_prog = QProgressBar()
-        layout.addWidget(self.vid_prog)
-        layout.addStretch()
-        w.setLayout(layout)
-        return w
-
-    def _build_gif_tab(self):
-        w = QWidget()
-        layout = QVBoxLayout()
-        
-        src_grp = QGroupBox("源")
-        src_grp.setFixedHeight(60)  # 2行文本高度
-        self.gif_src_type = QButtonGroup(w)
-        r1 = QRadioButton("视频")
-        r1.setChecked(True)
-        r2 = QRadioButton("图片文件夹")
-        self.gif_src_type.addButton(r1)
-        self.gif_src_type.addButton(r2)
-        hl = QHBoxLayout()
-        hl.addWidget(r1)
-        hl.addWidget(r2)
-        
-        l, self.gif_src_edit = self.create_file_input(self.gif_select)
-        hl.addLayout(l) # 将文件选择控件添加到同一行
-        
-        src_grp.setLayout(QVBoxLayout())
-        src_grp.layout().addLayout(hl)
-        layout.addWidget(src_grp)
-        
-        model_grp = QGroupBox("AI 模型")
-        model_grp.setFixedHeight(60)  # 强制限制高度
-        ml = QGridLayout()
-        ml.setContentsMargins(6,6,6,6)
-        ml.setHorizontalSpacing(6)
-        ml.setVerticalSpacing(4)
-        ml.addWidget(QLabel("选择模型:"), 0, 0)
-        self.gif_model = ModelSelector()
-        self.gif_model.model_changed.connect(self._on_model_changed)
-        ml.addWidget(self.gif_model, 0, 1, 1, 2)
-        ml.addWidget(QLabel("并行线程:"), 0, 3)
-        self.gif_threads = self.create_thread_selector()
-        ml.addWidget(self.gif_threads, 0, 4)
-        model_grp.setLayout(ml)
-        layout.addWidget(model_grp)
-        
-        opt = QGroupBox("GIF 参数")
-        opt.setFixedHeight(60)
-        ol = QGridLayout()
-        ol.setContentsMargins(6,6,6,6)
-        ol.setHorizontalSpacing(1)  # 减少间距 (5px -> 1px)
-        ol.setVerticalSpacing(2)
-        fps_l = QLabel("FPS:")
-        ol.addWidget(fps_l, 0, 0)
-        self.gif_fps = QSpinBox(); self.gif_fps.setValue(10); self.gif_fps.setRange(1, 60)
-        ol.addWidget(self.gif_fps, 0, 1)
-        step_l = QLabel("间隔:")
-        ol.addWidget(step_l, 0, 2)
-        self.gif_step = QSpinBox(); self.gif_step.setRange(1, 1000); self.gif_step.setValue(1)
-        ol.addWidget(self.gif_step, 0, 3)
-        
-        self.gif_transparency = QCheckBox("保留透明通道")
-        ol.addWidget(self.gif_transparency, 0, 4)
-        self.gif_rembg = QCheckBox("移除背景")
-        ol.addWidget(self.gif_rembg, 0, 5)
-        
-        opt.setLayout(ol)
-        layout.addWidget(opt)
-        
-        clean_grp = QGroupBox("清理选项")
-        clean_grp.setFixedHeight(115)  # 增加5px (110 -> 115)
-        cl = QGridLayout()
-        
-        self.gif_clean = QCheckBox("边缘清理")
-        cl.addWidget(self.gif_clean, 0, 0)
-        cl.addWidget(QLabel("腐蚀:"), 0, 1)
-        self.gif_feather = QSpinBox()
-        self.gif_feather.setValue(1)
-        self.gif_feather.setRange(0, 10)
-        cl.addWidget(self.gif_feather, 0, 2)
-        cl.addWidget(QLabel("模糊:"), 0, 3)
-        self.gif_blur = QSpinBox()
-        self.gif_blur.setValue(1)
-        self.gif_blur.setRange(0, 10)
-        cl.addWidget(self.gif_blur, 0, 4)
-        cl.addWidget(QLabel("Gamma:"), 0, 5)
-        self.gif_gamma = QDoubleSpinBox()
-        self.gif_gamma.setValue(1.2)
-        self.gif_gamma.setRange(0.5, 2.0)
-        self.gif_gamma.setSingleStep(0.1)
-        cl.addWidget(self.gif_gamma, 0, 6)
-        cl.addWidget(QLabel("清理预设:"), 0, 7)
-        self.gif_clean_preset = QComboBox()
-        self.gif_clean_preset.addItems(["关闭", "轻度", "标准", "强力", "自定义"])
-        self.gif_clean_preset.setCurrentText("标准")
-        cl.addWidget(self.gif_clean_preset, 0, 8)
-        
-        self.gif_iso = QCheckBox("移除孤立色块")
-        cl.addWidget(self.gif_iso, 1, 0)
-        cl.addWidget(QLabel("最小保留:"), 1, 1)
-        self.gif_iso_area = QSpinBox()
-        self.gif_iso_area.setValue(50)
-        self.gif_iso_area.setRange(1, 50000)
-        cl.addWidget(self.gif_iso_area, 1, 2)
-        
-        self.gif_internal = QCheckBox("清理内部孔洞")
-        self.gif_internal.setChecked(True)
-        cl.addWidget(self.gif_internal, 1, 3)
-        cl.addWidget(QLabel("孔洞最大:"), 1, 4)
-        self.gif_internal_area = QSpinBox()
-        self.gif_internal_area.setValue(100)
-        self.gif_internal_area.setRange(1, 10000)
-        cl.addWidget(self.gif_internal_area, 1, 5)
-        def _apply_gif_preset(name: str):
-            if name == "关闭":
-                self.gif_clean.setChecked(False)
-                self.gif_iso.setChecked(False)
-                self.gif_internal.setChecked(False)
-                self.gif_feather.setValue(0)
-                self.gif_blur.setValue(0)
-                self.gif_gamma.setValue(1.0)
-                self.gif_iso_area.setValue(10)
-                self.gif_internal_area.setValue(50)
-                for w in [self.gif_feather, self.gif_blur, self.gif_gamma, self.gif_iso_area, self.gif_internal_area]:
-                    w.setEnabled(False)
-            elif name == "轻度":
-                self.gif_clean.setChecked(True)
-                self.gif_iso.setChecked(True)
-                self.gif_internal.setChecked(True)
-                self.gif_feather.setValue(1)
-                self.gif_blur.setValue(1)
-                self.gif_gamma.setValue(1.0)
-                self.gif_iso_area.setValue(20)
-                self.gif_internal_area.setValue(80)
-                for w in [self.gif_feather, self.gif_blur, self.gif_gamma, self.gif_iso_area, self.gif_internal_area]:
-                    w.setEnabled(False)
-            elif name == "标准":
-                self.gif_clean.setChecked(True)
-                self.gif_iso.setChecked(True)
-                self.gif_internal.setChecked(True)
-                self.gif_feather.setValue(1)
-                self.gif_blur.setValue(1)
-                self.gif_gamma.setValue(1.2)
-                self.gif_iso_area.setValue(50)
-                self.gif_internal_area.setValue(100)
-                for w in [self.gif_feather, self.gif_blur, self.gif_gamma, self.gif_iso_area, self.gif_internal_area]:
-                    w.setEnabled(False)
-            elif name == "强力":
-                self.gif_clean.setChecked(True)
-                self.gif_iso.setChecked(True)
-                self.gif_internal.setChecked(True)
-                self.gif_feather.setValue(2)
-                self.gif_blur.setValue(2)
-                self.gif_gamma.setValue(1.3)
-                self.gif_iso_area.setValue(150)
-                self.gif_internal_area.setValue(200)
-                for w in [self.gif_feather, self.gif_blur, self.gif_gamma, self.gif_iso_area, self.gif_internal_area]:
-                    w.setEnabled(False)
-            else:
-                self.gif_clean.setChecked(True)
-                self.gif_iso.setChecked(True)
-                self.gif_internal.setChecked(True)
-                for w in [self.gif_feather, self.gif_blur, self.gif_gamma, self.gif_iso_area, self.gif_internal_area]:
-                    w.setEnabled(True)
-        self.gif_clean_preset.currentTextChanged.connect(_apply_gif_preset)
-        
-        def _on_gif_rembg_toggled(checked):
-            self.gif_clean_preset.setEnabled(checked)
-            self.gif_clean.setEnabled(checked)
-            self.gif_iso.setEnabled(checked)
-            self.gif_internal.setEnabled(checked)
-            
-            if not checked:
-                for w in [self.gif_feather, self.gif_blur, self.gif_gamma, self.gif_iso_area, self.gif_internal_area]:
-                    w.setEnabled(False)
-            else:
-                _apply_gif_preset(self.gif_clean_preset.currentText())
-
-        self.gif_rembg.toggled.connect(_on_gif_rembg_toggled)
-        _on_gif_rembg_toggled(self.gif_rembg.isChecked())
-        _apply_gif_preset(self.gif_clean_preset.currentText())
-        
-        self.gif_bg_type = QComboBox()
-        self.gif_bg_type.addItems(["none", "color"])
-        cl.addWidget(QLabel("背景:"), 2, 0)
-        cl.addWidget(self.gif_bg_type, 2, 1)
-        
-        # 【修复】使用颜色选择器
-        self.gif_bg_color = ColorPickerWidget("#FFFFFF")
-        cl.addWidget(self.gif_bg_color, 2, 2, 1, 2)
-        
-        self.gif_transparency.toggled.connect(lambda s: [self.gif_bg_type.setEnabled(not s), self.gif_bg_color.setEnabled(not s)])
-
-        clean_grp.setLayout(cl)
-        layout.addWidget(clean_grp)
-        
-        self.gif_prog = QProgressBar()
-        layout.addWidget(self.gif_prog)
-        w.setLayout(layout)
-        return w
-
-    def _build_single_image_tab(self):
-        w = QWidget()
-        layout = QVBoxLayout()
-        
-        grp = QGroupBox("单图")
-        grp.setFixedHeight(60)
-        l, self.single_src_edit = self.create_file_input(self.single_select)
-        grp.setLayout(l)
-        layout.addWidget(grp)
-        
-        model_grp = QGroupBox("AI 模型")
-        model_grp.setFixedHeight(60)  # 强制限制高度
-        ml = QGridLayout()
-        ml.setContentsMargins(6,6,6,6)
-        ml.setHorizontalSpacing(6)
-        ml.setVerticalSpacing(4)
-        ml.addWidget(QLabel("选择模型:"), 0, 0)
-        self.single_model = ModelSelector()
-        self.single_model.model_changed.connect(self._on_model_changed)
-        ml.addWidget(self.single_model, 0, 1, 1, 2)
-        ml.addWidget(QLabel("并行线程:"), 0, 3)
-        self.single_threads = self.create_thread_selector()
-        ml.addWidget(self.single_threads, 0, 4)
-        model_grp.setLayout(ml)
-        layout.addWidget(model_grp)
-        
-        opt = QGroupBox("处理选项")
-        ol = QGridLayout()
-        
-        self.single_clean = QCheckBox("边缘清理")
-        ol.addWidget(self.single_clean, 0, 0)
-        ol.addWidget(QLabel("腐蚀:"), 0, 1)
-        self.single_feather = QSpinBox()
-        self.single_feather.setValue(1)
-        self.single_feather.setRange(0, 10)
-        ol.addWidget(self.single_feather, 0, 2)
-        ol.addWidget(QLabel("模糊:"), 0, 3)
-        self.single_blur = QSpinBox()
-        self.single_blur.setValue(1)
-        self.single_blur.setRange(0, 10)
-        ol.addWidget(self.single_blur, 0, 4)
-        ol.addWidget(QLabel("Gamma:"), 0, 5)
-        self.single_gamma = QDoubleSpinBox()
-        self.single_gamma.setValue(1.2)
-        self.single_gamma.setRange(0.5, 2.0)
-        self.single_gamma.setSingleStep(0.1)
-        ol.addWidget(self.single_gamma, 0, 6)
-        ol.addWidget(QLabel("清理预设:"), 0, 7)
-        self.single_clean_preset = QComboBox()
-        self.single_clean_preset.addItems(["关闭", "轻度", "标准", "强力", "自定义"])
-        self.single_clean_preset.setCurrentText("标准")
-        ol.addWidget(self.single_clean_preset, 0, 8)
-        
-        self.single_iso = QCheckBox("去杂色")
-        ol.addWidget(self.single_iso, 1, 0)
-        ol.addWidget(QLabel("最小保留:"), 1, 1)
-        self.single_iso_area = QSpinBox()
-        self.single_iso_area.setValue(50)
-        self.single_iso_area.setRange(1, 50000)
-        ol.addWidget(self.single_iso_area, 1, 2)
-        
-        self.single_internal = QCheckBox("清理内部孔洞")
-        self.single_internal.setChecked(True)
-        ol.addWidget(self.single_internal, 1, 3)
-        ol.addWidget(QLabel("孔洞最大:"), 1, 4)
-        self.single_internal_area = QSpinBox()
-        self.single_internal_area.setValue(100)
-        self.single_internal_area.setRange(1, 10000)
-        ol.addWidget(self.single_internal_area, 1, 5)
-        def _apply_single_preset(name: str):
-            if name == "关闭":
-                self.single_clean.setChecked(False)
-                self.single_iso.setChecked(False)
-                self.single_internal.setChecked(False)
-                self.single_feather.setValue(0)
-                self.single_blur.setValue(0)
-                self.single_gamma.setValue(1.0)
-                self.single_iso_area.setValue(10)
-                self.single_internal_area.setValue(50)
-                for w in [self.single_feather, self.single_blur, self.single_gamma, self.single_iso_area, self.single_internal_area]:
-                    w.setEnabled(False)
-            elif name == "轻度":
-                self.single_clean.setChecked(True)
-                self.single_iso.setChecked(True)
-                self.single_internal.setChecked(True)
-                self.single_feather.setValue(1)
-                self.single_blur.setValue(1)
-                self.single_gamma.setValue(1.0)
-                self.single_iso_area.setValue(20)
-                self.single_internal_area.setValue(80)
-                for w in [self.single_feather, self.single_blur, self.single_gamma, self.single_iso_area, self.single_internal_area]:
-                    w.setEnabled(False)
-            elif name == "标准":
-                self.single_clean.setChecked(True)
-                self.single_iso.setChecked(True)
-                self.single_internal.setChecked(True)
-                self.single_feather.setValue(1)
-                self.single_blur.setValue(1)
-                self.single_gamma.setValue(1.2)
-                self.single_iso_area.setValue(50)
-                self.single_internal_area.setValue(100)
-                for w in [self.single_feather, self.single_blur, self.single_gamma, self.single_iso_area, self.single_internal_area]:
-                    w.setEnabled(False)
-            elif name == "强力":
-                self.single_clean.setChecked(True)
-                self.single_iso.setChecked(True)
-                self.single_internal.setChecked(True)
-                self.single_feather.setValue(2)
-                self.single_blur.setValue(2)
-                self.single_gamma.setValue(1.3)
-                self.single_iso_area.setValue(150)
-                self.single_internal_area.setValue(200)
-                for w in [self.single_feather, self.single_blur, self.single_gamma, self.single_iso_area, self.single_internal_area]:
-                    w.setEnabled(False)
-            else:
-                self.single_clean.setChecked(True)
-                self.single_iso.setChecked(True)
-                self.single_internal.setChecked(True)
-                for w in [self.single_feather, self.single_blur, self.single_gamma, self.single_iso_area, self.single_internal_area]:
-                    w.setEnabled(True)
-        self.single_clean_preset.currentTextChanged.connect(_apply_single_preset)
-        _apply_single_preset(self.single_clean_preset.currentText())
-        
-        self.single_bg_type = QComboBox()
-        self.single_bg_type.addItems(["none", "color"])
-        ol.addWidget(self.single_bg_type, 2, 0)
-        
-        # 【修复】使用颜色选择器
-        self.single_bg_color = ColorPickerWidget("#FFFFFF")
-        ol.addWidget(self.single_bg_color, 2, 1, 1, 3)
-        
-        opt.setLayout(ol)
-        layout.addWidget(opt)
-        
-        # ==================== ICO 生成 ====================
-        ico_grp = QGroupBox("ICO 生成 (可选)")
-        il = QGridLayout()
-        il.setContentsMargins(6,6,6,6)
-        
-        self.ico_enabled = QCheckBox("启用 ICO 生成")
-        il.addWidget(self.ico_enabled, 0, 0, 1, 6)
-        
-        self.ico_system = QCheckBox("系统 ICO (多尺寸容器)")
-        self.ico_system.setToolTip("生成包含多个尺寸的 .ico 文件，让系统自动选择最佳显示效果。")
-        self.ico_system.toggled.connect(self._on_ico_system_toggled)
-        il.addWidget(self.ico_system, 0, 4, 1, 2)
-        
-        self.ico_sizes = {}
-        # 16x16 ... 480x480
-        sizes = [16, 24, 32, 48, 64, 72, 80, 96, 128, 256, 320, 480]
-        row = 1
-        col = 0
-        for s in sizes:
-            cb = QCheckBox(f"{s}x{s}")
-            self.ico_sizes[s] = cb
-            il.addWidget(cb, row, col)
-            col += 1
-            if col >= 6:
-                col = 0
-                row += 1
-        
-        self.ico_transparent = QCheckBox("保留透明通道")
-        self.ico_transparent.setChecked(True)
-        il.addWidget(self.ico_transparent, row+1, 0, 1, 3)
-        
-        self.ico_opaque = QCheckBox("生成无透明版本(白底)")
-        il.addWidget(self.ico_opaque, row+1, 3, 1, 3)
-        
-        self.ico_png = QCheckBox("生成 PNG")
-        il.addWidget(self.ico_png, row+2, 0, 1, 3)
-        
-        def _toggle_ico(checked):
-            for w in self.ico_sizes.values():
-                w.setEnabled(checked)
-            self.ico_transparent.setEnabled(checked)
-            self.ico_opaque.setEnabled(checked)
-            self.ico_png.setEnabled(checked)
-            self.ico_system.setEnabled(checked)
-            
-        self.ico_enabled.toggled.connect(_toggle_ico)
-        # 强制初始化状态
-        _toggle_ico(self.ico_enabled.isChecked())
-        # 确保初始未选中时是禁用的，选中时是启用的。
-        # 如果默认 self.ico_enabled 是未选中的，那么 checkState() 是 0 (Unchecked)，enabled 为 False。
-        # 如果默认是选中的，checkState() 是 2 (Checked)，enabled 为 True。
-        # 注意：Qt.Checked 枚举值通常为 2。
-        
-        ico_grp.setLayout(il)
-        layout.addWidget(ico_grp)
-        # ================================================
-        
-        self.single_prog = QProgressBar()
-        layout.addWidget(self.single_prog)
-        layout.addStretch()
-        w.setLayout(layout)
-        return w
-
-    def _build_settings_tab(self):
-        w = QWidget()
-        layout = QVBoxLayout()
-        
-        model_grp = QGroupBox("模型设置")
-        ml = QGridLayout()
-        
-        ml.addWidget(QLabel("模型存储目录:"), 0, 0)
-        self.model_dir_edit = QLineEdit(ConfigManager.get_model_dir())
-        self.model_dir_edit.setReadOnly(True)
-        ml.addWidget(self.model_dir_edit, 0, 1)
-        
-        open_model_dir_btn = QPushButton("打开目录")
-        open_model_dir_btn.clicked.connect(lambda: os.startfile(ConfigManager.get_model_dir()) if os.path.exists(ConfigManager.get_model_dir()) else None)
-        ml.addWidget(open_model_dir_btn, 0, 2)
-        
-        hint = self.create_hint_label('将 .onnx 模型文件放入此目录，然后点击"刷新模型状态"即可使用自定义模型')
-        ml.addWidget(hint, 1, 0, 1, 3)
-        
-        model_grp.setLayout(ml)
-        layout.addWidget(model_grp)
-        
-        # 硬件信息与输出路径并排布局
-        hw_paths_layout = QHBoxLayout()
-        
-        # 硬件信息 (减少 120px 宽度)
-        hw_grp = QGroupBox("硬件信息")
-        hw_grp.setFixedHeight(220)  # 增加10px (210 -> 220)
-        hw_grp.setFixedWidth(200)   # 假设原宽约320，减120后设为200 (实际通过layout stretch控制，这里尝试固定宽度或调整stretch)
-        # 由于是 QHBoxLayout，更推荐调整 stretch。
-        # 原比例 3:7。要减少左边增加右边。
-        # 假设总宽1000，左300右700。减少120 -> 左180右820。
-        # 比例约为 1.8 : 8.2 -> 9 : 41。或者直接用固定宽度。
-        # 用户要求“硬件信息宽度减小120像素”，如果之前是自动拉伸，现在最好给硬件信息设置固定宽度或者最大宽度。
-        # 之前代码：hw_paths_layout.addWidget(hw_grp, 3) ... addWidget(pg, 7)
-        # 这里我们尝试调整 stretch 或者直接设置FixedWidth。
-        # 考虑到响应式，调整 stretch 可能不够精确，但更灵活。
-        # 不过用户说了具体像素，可能更希望是固定变化。
-        # 让我们尝试设置 hw_grp 的 MaximumWidth，并调整 stretch。
-        
-        hl = QGridLayout()
-        hl.setContentsMargins(6,6,6,6)
-        hl.setHorizontalSpacing(8)
-        hl.setVerticalSpacing(4)
-        
-        # 一行显示一项内容
-        hl.addWidget(QLabel("GPU:"), 0, 0)
-        hl.addWidget(QLabel(f"{'✓ ' + HardwareInfo.gpu_name if HardwareInfo.gpu_available else '○ 未检测到'}"), 0, 1)
-        
-        hl.addWidget(QLabel("GPU 显存:"), 1, 0)
-        hl.addWidget(QLabel(f"{HardwareInfo.gpu_memory_mb} MB" if HardwareInfo.gpu_available else "N/A"), 1, 1)
-        
-        hl.addWidget(QLabel("CPU 线程:"), 2, 0)
-        hl.addWidget(QLabel(str(HardwareInfo.cpu_threads)), 2, 1)
-        
-        hl.addWidget(QLabel("可用内存:"), 3, 0)
-        hl.addWidget(QLabel(f"{HardwareInfo.available_memory_mb} MB"), 3, 1)
-        
-        hl.addWidget(QLabel("rembg:"), 4, 0)
-        hl.addWidget(QLabel(f"{'✓ 已安装' if USE_REMBG else '✗ 未安装'}"), 4, 1)
-        
-        hl.addWidget(QLabel("ONNX:"), 5, 0)
-        # ONNX 内容分两行显示
-        onnx_text = ", ".join(HardwareInfo.onnx_providers) if HardwareInfo.onnx_providers else "N/A"
-        # 简单的换行处理，例如每25个字符换行，或者直接设置 WordWrap
-        onnx_label = QLabel(onnx_text)
-        onnx_label.setWordWrap(True)
-        hl.addWidget(onnx_label, 5, 1, 2, 1) # 占两行高度
-        
-        hw_grp.setLayout(hl)
-        hw_paths_layout.addWidget(hw_grp) # 不再设置stretch，使用FixedWidth
-        
-        # 输出路径 (增加 120px 宽度)
-        pg = QGroupBox("输出路径 (biemo 目录)")
-        pg.setFixedHeight(220)  # 增加10px (210 -> 220)
-        pgl = QGridLayout()
-        self.path_edits = {}
-        output_paths = ConfigManager.get("output_paths", ConfigManager.DEFAULT_CONFIG["output_paths"])
-        for i, (k, v) in enumerate(output_paths.items()):
-            pgl.addWidget(QLabel(k), i, 0)
-            le = QLineEdit(ConfigManager.get_output_path(k))
-            le.setReadOnly(True)
-            self.path_edits[k] = le
-            pgl.addWidget(le, i, 1)
-            btn = QPushButton("打开")
-            btn.setFixedWidth(50)
-            btn.clicked.connect(lambda _, path=ConfigManager.get_output_path(k): os.startfile(path) if os.path.exists(path) else None)
-            pgl.addWidget(btn, i, 2)
-        
-        pg.setLayout(pgl)
-        hw_paths_layout.addWidget(pg) # 剩余空间自动给输出路径
-        
-        layout.addLayout(hw_paths_layout)
-        
-        act = QGroupBox("激活信息")
-        act.setFixedHeight(80)  # 增加10px (70 -> 80)
-        al = QVBoxLayout()
-        al.setContentsMargins(6,6,6,6)
-        
-        row1 = QHBoxLayout()
-        row1.addWidget(QLabel(f"机器码: {LicenseManager.get_machine_code()}"))
-        if not self.activated:
-            btn = QPushButton("输入激活码")
-            btn.clicked.connect(self._show_activation_dialog)
-            row1.addWidget(btn)
-        row1.addStretch()
-        al.addLayout(row1)
-        
-        al.addWidget(QLabel(f"激活文件: {LicenseManager.get_license_file()}"))
-        
-        act.setLayout(al)
-        layout.addWidget(act)
-        
-        s_box = QCheckBox("开启完成音效")
-        s_box.setChecked(self.enable_sound)
-        s_box.toggled.connect(lambda s: [setattr(self, 'enable_sound', s), ConfigManager.set("enable_sound", s)])
-        layout.addWidget(s_box)
-        
-        layout.addStretch()
-        w.setLayout(layout)
-        return w
-
-    def sprite_select_source(self): 
-        sid = self.sprite_source_type.checkedId()
-        if sid == 0:
-            self._select_file(self.sprite_path_edit, file_mode=True, filter="Video (*.mp4 *.avi *.mov *.mkv *.webm)")
-        elif sid == 1:
-            self._select_file(self.sprite_path_edit, file_mode=False)
-        else:
-            self._select_file(self.sprite_path_edit, file_mode=True, filter="PNG 图片 (*.png)")
-    def extract_select(self): 
-        self._select_file(self.extract_path_edit, file_mode=True)
-    def vid_select(self): 
-        self._select_file(self.vid_src_edit, file_mode=False)
-    def gif_select(self): 
-        self._select_file(self.gif_src_edit, file_mode=self.gif_src_type.checkedButton().text()=="视频")
-    def single_select(self): 
-        self._select_file(self.single_src_edit, file_mode=True, filter="Img (*.png *.jpg *.bmp)")
-    def beiou_select(self):
-        self._select_file(self.beiou_path_edit, file_mode=True, filter="Video (*.mp4 *.avi *.mov *.mkv *.webm)")
-
-    def _select_file(self, edit_widget, file_mode=True, filter="Video (*.mp4 *.avi *.mov *.mkv)"):
-        if file_mode: 
-            f, _ = QFileDialog.getOpenFileName(self, "选择文件", "", filter)
-        else: 
-            f = QFileDialog.getExistingDirectory(self, "选择文件夹")
-        if f: 
-            edit_widget.setText(f)
-
-    def dragEnterEvent(self, e):
-        if e.mimeData().hasUrls():
-            e.accept()
-        else:
-            e.ignore()
-
-    def dropEvent(self, e):
-        try:
-            if not e.mimeData().hasUrls():
-                return
-            path = e.mimeData().urls()[0].toLocalFile()
-            idx = self.tabs.currentIndex()
-            if idx == 0:
-                self.sprite_path_edit.setText(path)
-            elif idx == 1:
-                self.extract_path_edit.setText(path)
-            elif idx == 2:
-                self.beiou_path_edit.setText(path)
-            elif idx == 3:
-                self.vid_src_edit.setText(path)
-            elif idx == 4:
-                self.gif_src_edit.setText(path)
-            elif idx == 5:
-                self.single_src_edit.setText(path)
-        except Exception:
-            pass
-
-    def show_result_dialog(self, result):
-        if isinstance(result, dict):
-            folder_path = result.get('folder')
-            video_path = result.get('video')
-            frames = result.get('frames')
-            duration = result.get('duration')
-            avg_fps = result.get('avg_fps')
-        else:
-            folder_path = result
-            video_path = None
-            frames = None
-            duration = None
-            avg_fps = None
-        if self.enable_sound:
-            play_completion_sound()
-        msg = QMessageBox(self)
-        msg.setWindowTitle("任务完成")
-        if video_path or frames or duration is not None or avg_fps is not None:
-            parts = []
-            if video_path:
-                parts.append(f"输出: {Path(video_path).name}")
-            if isinstance(frames, int):
-                parts.append(f"帧数: {frames}")
-            if isinstance(duration, (int, float)):
-                parts.append(f"耗时: {duration}s")
-            if isinstance(avg_fps, (int, float)):
-                parts.append(f"速度: {avg_fps} fps")
-            msg.setText("处理已完成！\n" + "\n".join(parts))
-        else:
-            msg.setText("处理已完成！")
-        msg.setIcon(QMessageBox.Information)
-        open_btn = msg.addButton("打开文件夹", QMessageBox.ActionRole)
-        msg.addButton("关闭", QMessageBox.RejectRole)
-        msg.exec()
-        if msg.clickedButton() == open_btn and folder_path:
-            try:
-                os.startfile(folder_path)
-            except:
-                try:
-                    subprocess.Popen(['xdg-open', folder_path])
+                    shutil.rmtree(extract_dir)
                 except:
                     pass
 
-    def sprite_run(self):
-        path = self.sprite_path_edit.text()
-        if not path:
-            logger.warning("请先选择源文件")
-            return
-        edit_mode = self.sprite_edit_mode.isChecked()
-        params = {
-            "source_type": "video" if self.sprite_source_type.checkedId()==0 else "images",
-            "model_name": self.sprite_model.get_current_model(),
-            "num_threads": self.sprite_threads.value(),
-            "frame_step": max(1, self.sprite_step.value()),
-            "columns": max(1, self.sprite_cols.value()),
-            "scale_mode": "percent" if self.sprite_percent.isChecked() else "fixed",
-            "scale_percent": self.sprite_scale_val.value(),
-            "thumb_w": self.sprite_w.value(),
-            "thumb_h": self.sprite_h.value(),
-            "remove_bg": self.sprite_rembg.isChecked(),
-            "cleanup_edge": self.sprite_clean.isChecked(),
-            "edge_feather": self.sprite_feather.value(),
-            "edge_blur": self.sprite_blur.value(),
-            "edge_gamma": self.sprite_gamma.value(),
-            "remove_isolated": self.sprite_iso.isChecked(),
-            "isolated_area": self.sprite_iso_area.value(),
-            "remove_internal": self.sprite_internal.isChecked(),
-            "internal_max_area": self.sprite_internal_area.value(),
-            "edit_mode": edit_mode,
-        }
-        logger.info(f"开始生成精灵图: {path}")
-        out = Path(ConfigManager.get_output_path("sprite"))
-        out.mkdir(parents=True, exist_ok=True)
-        if edit_mode:
-            self.current_worker = SpriteWorkerWithEditor(path, str(out), params, self)
-        else:
-            self.current_worker = SpriteWorker(path, str(out), params)
-        self.current_worker.progress.connect(lambda v, m: [self.sprite_prog.setValue(v), self.sprite_prog.setFormat(m)])
-        if edit_mode and hasattr(self.current_worker, 'frames_ready'):
-            self.current_worker.frames_ready.connect(self._on_sprite_frames_ready)
-        self.current_worker.error.connect(lambda e: logger.error(e))
-        self.current_worker.finished.connect(lambda d: self.show_result_dialog(d))
-        self.current_worker.start()
 
-    def sprite_preview(self):
-        path = self.sprite_path_edit.text()
-        if not path:
-            return
-        stype = "video" if self.sprite_source_type.checkedId()==0 else ("images" if self.sprite_source_type.checkedId()==1 else "sheet")
-        frames = []
+# ==================== 3. 环境检查器 ====================
+class EnvironmentChecker:
+    def __init__(self, log_func=print):
+        self.log = log_func
+    
+    def check_all(self):
+        PM.refresh()
+        results = {"ffmpeg": False, "ffmpeg_path": "", "details": {}}
+        
+        ffmpeg_status = self._check_ffmpeg()
+        results["ffmpeg"] = ffmpeg_status["available"]
+        results["ffmpeg_path"] = ffmpeg_status["path"]
+        results["details"]["FFmpeg"] = ffmpeg_status
+        
+        return results
+    
+    def _check_ffmpeg(self):
+        status = {"name": "FFmpeg", "available": False, "path": "", "reason": ""}
+        ffmpeg_path = PM.get_exe("ffmpeg")
+        if ffmpeg_path and os.path.isfile(ffmpeg_path):
+            status["path"] = ffmpeg_path
+            status["available"] = True
+            status["reason"] = "正常"
+            return status
         try:
-            if stype == "video" and HAS_CV2:
-                cap = cv2.VideoCapture(str(path))
-                total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                step = max(1, self.sprite_step.value())
-                count = 0
-                for i in range(0, total, step):
-                    if count >= 50: break
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-                    ret, f = cap.read()
-                    if not ret: break
-                    frame_rgb = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
-                    frames.append(Image.fromarray(frame_rgb).convert('RGBA'))
-                    count += 1
-                cap.release()
-            elif stype == "images":
-                files = sorted([f for f in (Path(path).glob('*') if Path(path).is_dir() else [Path(path)]) if f.suffix.lower() in ['.png','.jpg','.jpeg','.bmp']])
-                for i, fp in enumerate(files[:50]):
-                    img = Image.open(fp).convert('RGBA')
-                    frames.append(img)
-            else:
-                img = Image.open(path).convert('RGBA')
-                w, h = img.size
-                rows = max(1, int(self.sprite_rows.value()))
-                cols = max(1, int(self.sprite_cols_existing.value()))
-                cell_w = w // cols
-                cell_h = h // rows
-                total_cells = rows * cols
-                for idx in range(min(total_cells, 200)):
-                    c = idx % cols
-                    r = idx // cols
-                    box = (c*cell_w, r*cell_h, (c+1)*cell_w, (r+1)*cell_h)
-                    frames.append(img.crop(box))
-            spec = self.sprite_keep_frames.text()
-            if spec:
-                def parse_ranges(spec, n):
-                    res = set()
-                    for part in spec.replace('，', ',').split(','):
-                        part = part.strip()
-                        if not part: continue
-                        if '-' in part:
-                            a, b = part.split('-', 1)
-                            try:
-                                s = max(1, int(a)); e = min(n, int(b))
-                                for k in range(s, e+1): res.add(k-1)
-                            except: pass
-                        else:
-                            try:
-                                k = int(part);
-                                if 1 <= k <= n: res.add(k-1)
-                            except: pass
-                    return sorted(res)
-                idxs = parse_ranges(spec, len(frames))
-                if idxs:
-                    frames = [frames[i] for i in idxs]
-            dlg = SpritePreviewDialog(frames, fps=12, parent=self)
-            dlg.exec()
-        except Exception:
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            result = subprocess.run(['ffmpeg', '-version'], capture_output=True, startupinfo=si, timeout=10)
+            if result.returncode == 0:
+                status["available"] = True
+                status["path"] = "系统PATH"
+                status["reason"] = "系统PATH中找到"
+                return status
+        except:
             pass
+        status["reason"] = "未找到ffmpeg"
+        return status
+    
+    def get_report(self):
+        r = self.check_all()
+        lines = ["=" * 65, "📦 环境检测报告", "=" * 65, "",
+                 "📁 【目录配置】", f"  工具目录: {PM.tools_dir}", ""]
+        icon = "✅" if r["ffmpeg"] else "❌"
+        lines.append(f"  {icon} FFmpeg: {r['details'].get('FFmpeg', {}).get('reason', '')}")
+        lines.extend(["", "=" * 65])
+        return "\n".join(lines)
 
-    def _on_sprite_frames_ready(self, frames, source_path):
+
+# ==================== 4. GPU检测 ====================
+class GPUDetector:
+    def __init__(self):
+        self.info = self._detect()
+    
+    def _detect(self):
+        info = {"has_discrete": False, "has_integrated": False, "name": "未检测到", 
+                "vendor": "unknown", "memory_mb": 0, "cores": 0, "display_name": "CPU模式"}
+        gpu_list = self._try_powershell() or self._try_wmic() or []
+        for gpu in gpu_list:
+            name = gpu.get("name", "")
+            upper = name.upper()
+            if any(k in upper for k in ['NVIDIA', 'GEFORCE', 'RTX', 'GTX', 'AMD', 'RADEON', 'RX']):
+                info["has_discrete"] = True
+                info["name"] = name[:50]
+                info["vendor"] = "nvidia" if any(k in upper for k in ['NVIDIA', 'GEFORCE', 'RTX', 'GTX']) else "amd"
+                info["memory_mb"] = gpu.get("memory", 0)
+                info["display_name"] = name[:40]
+                break
+            elif any(k in upper for k in ['INTEL', 'UHD', 'IRIS', 'HD GRAPHICS']):
+                info["has_integrated"] = True
+                if not info["has_discrete"]:
+                    info["name"] = name[:50]
+                    info["vendor"] = "intel"
+                    info["display_name"] = name[:40]
+        
         try:
-            if self.current_worker:
-                self.current_worker._open_editor(frames)
-        except Exception as e:
-            logger.error(str(e))
-
-    def _edit_existing_sprite(self):
-        # 优先使用当前输入框中的文件
-        file_path = self.sprite_path_edit.text().strip()
+            info["cores"] = os.cpu_count() or 4
+        except:
+            info["cores"] = 4
         
-        # 如果输入框为空或者不是文件，则弹出选择框
-        if not file_path or not os.path.isfile(file_path):
-            file_path, _ = QFileDialog.getOpenFileName(self, "选择精灵图", "", "PNG 图片 (*.png)")
-        
-        if not file_path:
-            return
+        return info
+    
+    def _try_powershell(self):
         try:
-            dialog = SpriteEditorDialog(self, source_sprite_path=file_path)
-            if dialog.exec() == QDialog.Accepted:
-                selected_frames = dialog.get_selected_frames()
-                output_cols = dialog.get_output_cols()
-                if not selected_frames:
-                    QMessageBox.warning(self, "提示", "请至少选择一帧")
-                    return
-                    
-                self._generate_sprite_from_frames(selected_frames, output_cols, file_path)
-        except Exception as e:
-            logger.error(f"编辑精灵图失败: {e}")
-            traceback.print_exc()
-            QMessageBox.critical(self, "错误", f"编辑失败: {e}")
-
-    def _generate_sprite_from_frames(self, frames, cols, source_path=None):
-        if not frames:
-            return
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            ps_cmd = '''Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name + "|" + $_.AdapterRAM }'''
+            result = subprocess.check_output(['powershell', '-Command', ps_cmd],
+                startupinfo=si, timeout=15, stderr=subprocess.DEVNULL).decode('utf-8', errors='ignore')
+            gpu_list = []
+            for line in result.strip().split('\n'):
+                if '|' in line:
+                    parts = line.split('|')
+                    name = parts[0].strip()
+                    try:
+                        mem = int(parts[1].strip()) // (1024*1024) if len(parts) > 1 and parts[1].strip().isdigit() else 0
+                    except:
+                        mem = 0
+                    if name:
+                        gpu_list.append({"name": name, "memory": mem})
+            return gpu_list if gpu_list else None
+        except:
+            return None
+    
+    def _try_wmic(self):
         try:
-            fw, fh = frames[0].size
-            rows = math.ceil(len(frames) / max(1, cols))
-            sheet = Image.new("RGBA", (cols * fw, rows * fh))
-            for idx, frame in enumerate(frames):
-                c, r = idx % cols, idx // cols
-                if frame.mode != 'RGBA':
-                    frame = frame.convert('RGBA')
-                sheet.paste(frame, (c * fw, r * fh), frame)
-            out_dir = Path(ConfigManager.get_output_path("sprite"))
-            out_dir.mkdir(parents=True, exist_ok=True)
-            if source_path:
-                base_name = Path(source_path).stem
-                if base_name.endswith('_bj'):
-                    base_name = base_name[:-3]
-                out_name = f"{base_name}_bj_{len(frames)}.png"
-            else:
-                out_name = f"sprite_bj_{len(frames)}_{datetime.now():%H%M%S}.png"
-            out_path = out_dir / out_name
-            sheet.save(str(out_path))
-            logger.success(f"编辑精灵图生成完成: {out_path}")
-            self.show_result_dialog(str(out_dir))
-        except Exception as e:
-            logger.error(f"生成精灵图失败: {e}")
-            QMessageBox.critical(self, "错误", f"生成失败: {e}")
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            result = subprocess.check_output('wmic path win32_VideoController get name',
+                startupinfo=si, shell=True, timeout=10, stderr=subprocess.DEVNULL).decode('gbk', errors='ignore')
+            gpu_list = []
+            for line in result.split('\n'):
+                line = line.strip()
+                if line and 'Name' not in line:
+                    gpu_list.append({"name": line, "memory": 0})
+            return gpu_list if gpu_list else None
+        except:
+            return None
+    
+    def get_status(self):
+        i = self.info
+        if i["has_discrete"]:
+            icon = "🟢" if i["vendor"] == "nvidia" else "🔴"
+            mem = f" ({i['memory_mb']}MB)" if i['memory_mb'] > 0 else ""
+            return f"{icon} {i['name']}{mem}"
+        elif i["has_integrated"]:
+            return f"🔵 {i['name']}"
+        return "⚙️ CPU模式"
+    
+    def get_short_status(self):
+        """获取简短的GPU状态用于标题栏显示"""
+        i = self.info
+        if i["has_discrete"]:
+            return i['name'][:30]
+        elif i["has_integrated"]:
+            return i['name'][:30]
+        return "CPU模式"
+    
+    def get_cores(self):
+        return self.info.get("cores", 4)
 
-    def _on_beiou_format_changed(self, index):
-        format_text = self.beiou_format.currentText()
-        is_webm_alpha = "透明通道" in format_text
-        self.beiou_preserve_alpha.setEnabled(is_webm_alpha)
-        self.beiou_preserve_alpha.setChecked(is_webm_alpha)
-        self.beiou_bg_color.setEnabled(not is_webm_alpha)
-        self.beiou_audio.setEnabled(is_webm_alpha)
-        self.beiou_audio.setChecked(is_webm_alpha)
-        self.beiou_speed.setEnabled(is_webm_alpha)
 
-    def extract_run(self):
-        path = self.extract_path_edit.text()
-        if not path:
-            logger.warning("请先选择视频文件")
-            return
-        
-        params = {
-            "extract_mode": "first_last" if self.extract_mode.checkedId()==0 else "all",
-            "model_name": self.extract_model.get_current_model(),
-            "num_threads": self.extract_threads.value(),
-            "frame_step": max(1, self.extract_step.value()),
-            "remove_bg": self.extract_rembg.isChecked(),
-            "bg_type": self.extract_bg_type.currentText(),
-            "bg_color": self.extract_bg_color.get_color(),  # 【修复】使用颜色选择器
-            "bg_image": self.extract_bg_img.text(),
-            "cleanup_edge": self.extract_clean.isChecked(),
-            "edge_feather": self.extract_feather.value(), 
-            "edge_blur": self.extract_blur.value(),
-            "edge_gamma": self.extract_gamma.value(),
-            "remove_isolated": self.extract_iso.isChecked(), 
-            "isolated_area": self.extract_iso_area.value(),
-            "remove_internal": self.extract_internal.isChecked(),
-            "internal_max_area": self.extract_internal_area.value(),
+# ==================== 5. 任务状态枚举 ====================
+class TaskStatus(Enum):
+    PENDING = "pending"      # 等待处理
+    RUNNING = "running"      # 正在处理
+    PAUSED = "paused"        # 已暂停
+    COMPLETED = "completed"  # 已完成
+    FAILED = "failed"        # 失败
+    STOPPED = "stopped"      # 已停止
+
+
+# ==================== 6. 任务数据类 ====================
+@dataclass
+class TaskItem:
+    """任务项数据类"""
+    task_id: str
+    input_path: str
+    output_path: str
+    status: TaskStatus = TaskStatus.PENDING
+    progress: float = 0.0
+    current_frame: int = 0
+    total_frames: int = 0
+    
+    # 处理配置
+    use_detail_restore: bool = False
+    detail_intensity: str = "medium"
+    detail_opts: Dict[str, bool] = field(default_factory=dict)
+    
+    use_basic: bool = False
+    basic_intensity: str = "medium"
+    basic_opts: Dict[str, bool] = field(default_factory=dict)
+    filter_opts: Dict[str, bool] = field(default_factory=dict)
+    
+    use_advanced: bool = False
+    adv_intensity: str = "medium"
+    smart_mode: bool = True
+    adv_opts: Dict[str, bool] = field(default_factory=dict)
+    
+    # 时间统计
+    start_time: float = 0.0
+    elapsed_time: float = 0.0
+    fps: float = 0.0
+    
+    def get_filename(self) -> str:
+        return os.path.basename(self.input_path)
+    
+    def get_process_types(self) -> str:
+        """获取处理类型描述"""
+        types = []
+        if self.use_detail_restore:
+            types.append("细节修复")
+        if self.use_basic:
+            types.append("智能后期")
+        if self.use_advanced:
+            types.append("高级后期")
+        return ", ".join(types) if types else "无处理"
+    
+    def get_progress_text(self) -> str:
+        if self.status == TaskStatus.PENDING:
+            return "尚未处理"
+        elif self.status == TaskStatus.RUNNING:
+            return f"{self.current_frame}/{self.total_frames} ({self.progress:.0f}%)"
+        elif self.status == TaskStatus.COMPLETED:
+            return f"{self.total_frames}/{self.total_frames} (100%)"
+        elif self.status == TaskStatus.PAUSED:
+            return f"已暂停 {self.progress:.0f}%"
+        elif self.status == TaskStatus.STOPPED:
+            return "已停止"
+        elif self.status == TaskStatus.FAILED:
+            return "处理失败"
+        return ""
+    
+    def get_config(self) -> Dict[str, Any]:
+        """获取完整配置字典"""
+        cfg = {
+            "use_detail_restore": self.use_detail_restore,
+            "detail_intensity": self.detail_intensity,
+            "use_basic": self.use_basic,
+            "basic_intensity": self.basic_intensity,
+            "use_advanced": self.use_advanced,
+            "adv_intensity": self.adv_intensity,
+            "smart_mode": self.smart_mode,
         }
-        
-        logger.info(f"开始提取视频帧: {path}")
-        
-        out = Path(ConfigManager.get_output_path("extract"))
-        self.current_worker = VideoToImagesWorker(path, str(out), params)
-        self.current_worker.progress.connect(lambda v, m: [self.extract_prog.setValue(v), self.extract_prog.setFormat(m)])
-        self.current_worker.error.connect(lambda e: logger.error(e))
-        self.current_worker.finished.connect(lambda d: self.show_result_dialog(d['folder']))
-        self.current_worker.start()
+        cfg.update(self.detail_opts)
+        cfg.update(self.basic_opts)
+        cfg.update(self.filter_opts)
+        cfg.update(self.adv_opts)
+        return cfg
 
-    def beiou_run(self):
-        """视频扣像"""
-        path = self.beiou_path_edit.text()
-        if not path:
-            logger.warning("请先选择视频文件")
-            return
-        
-        format_text = self.beiou_format.currentText()
-        preserve_alpha = "透明通道" in format_text
-        if "mp4" in format_text:
-            output_format = "mp4"
-            ext = ".mp4"
-        elif "avi" in format_text:
-            output_format = "avi"
-            ext = ".avi"
-        else:
-            output_format = "webm"
-            ext = ".webm"
-        
-        params = {
-            "model_name": self.beiou_model.get_current_model(),
-            "output_format": output_format,
-            "preserve_alpha": preserve_alpha,
-            "crf": self.beiou_crf.value(),
-            "include_audio": self.beiou_audio.isChecked(),
-            "speed_mode": self.beiou_speed.currentText(),
-            "bg_color": self.beiou_bg_color.get_color(),
-            "cleanup_edge": self.beiou_clean.isChecked(),
-            "edge_feather": self.beiou_feather.value(),
-            "edge_blur": self.beiou_blur.value(),
-            "edge_gamma": self.beiou_gamma.value(),
-            "remove_isolated": self.beiou_iso.isChecked(),
-            "isolated_area": self.beiou_iso_area.value(),
-            "remove_internal": self.beiou_internal.isChecked(),
-            "internal_max_area": self.beiou_internal_area.value(),
-        }
-        
-        logger.info(f"开始视频扣像: {path}")
-        
-        out_dir = Path(ConfigManager.get_output_path("beiou"))
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"{Path(path).stem}_rembg_{datetime.now():%H%M%S}{ext}"
-        
-        self.current_worker = VideoRemoveBgWorker(path, str(out_path), params)
-        self.current_worker.progress.connect(lambda v, m: [self.beiou_prog.setValue(v), self.beiou_prog.setFormat(m)])
-        self.current_worker.error.connect(lambda e: logger.error(e))
-        self.current_worker.finished.connect(lambda d: self.show_result_dialog(d['folder']))
-        self.current_worker.start()
 
-    def vid_run(self):
-        path = self.vid_src_edit.text()
-        if not path:
-            logger.warning("请先选择图片文件夹")
-            return
-        
-        params = {
-            "fps": max(1, self.vid_fps.value()),
-            "bg_type": self.vid_bg_type.currentText(),
-            "bg_color": self.vid_bg_color.get_color()  # 【修复】使用颜色选择器
-        }
-        
-        logger.info(f"开始合成视频: {path}")
-        
-        out = Path(ConfigManager.get_output_path("video")) / f"video_{datetime.now():%H%M%S}.mp4"
-        out.parent.mkdir(exist_ok=True)
-        self.current_worker = ImagesToVideoWorker(path, str(out), params)
-        self.current_worker.progress.connect(lambda v, m: [self.vid_prog.setValue(v), self.vid_prog.setFormat(m)])
-        self.current_worker.error.connect(lambda e: logger.error(e))
-        self.current_worker.finished.connect(lambda d: self.show_result_dialog(d['folder']))
-        self.current_worker.start()
+# ==================== 7. 任务管理器 ====================
+class TaskManager:
+    """任务管理器 - 管理所有处理任务"""
+    
+    def __init__(self):
+        self.tasks: Dict[str, TaskItem] = {}
+        self.task_order: List[str] = []  # 保持任务顺序
+        self.current_task_id: Optional[str] = None
+        self._lock = threading.Lock()
+    
+    def add_task(self, task: TaskItem) -> str:
+        """添加任务"""
+        with self._lock:
+            self.tasks[task.task_id] = task
+            self.task_order.append(task.task_id)
+        return task.task_id
+    
+    def remove_task(self, task_id: str) -> bool:
+        """移除任务"""
+        with self._lock:
+            if task_id in self.tasks:
+                del self.tasks[task_id]
+                self.task_order.remove(task_id)
+                return True
+        return False
+    
+    def get_task(self, task_id: str) -> Optional[TaskItem]:
+        """获取任务"""
+        return self.tasks.get(task_id)
+    
+    def get_all_tasks(self) -> List[TaskItem]:
+        """按顺序获取所有任务"""
+        return [self.tasks[tid] for tid in self.task_order if tid in self.tasks]
+    
+    def get_pending_tasks(self) -> List[TaskItem]:
+        """获取待处理任务"""
+        return [t for t in self.get_all_tasks() if t.status == TaskStatus.PENDING]
+    
+    def get_next_task(self) -> Optional[TaskItem]:
+        """获取下一个待处理任务"""
+        for tid in self.task_order:
+            task = self.tasks.get(tid)
+            if task and task.status == TaskStatus.PENDING:
+                return task
+        return None
+    
+    def update_task(self, task_id: str, **kwargs):
+        """更新任务属性"""
+        with self._lock:
+            task = self.tasks.get(task_id)
+            if task:
+                for key, value in kwargs.items():
+                    if hasattr(task, key):
+                        setattr(task, key, value)
+    
+    def clear_all(self):
+        """清除所有任务"""
+        with self._lock:
+            self.tasks.clear()
+            self.task_order.clear()
+            self.current_task_id = None
+    
+    def get_task_count(self) -> int:
+        """获取任务数量"""
+        return len(self.tasks)
+    
+    def get_completed_count(self) -> int:
+        """获取已完成任务数量"""
+        return sum(1 for t in self.tasks.values() if t.status == TaskStatus.COMPLETED)
 
-    def gif_run(self):
-        path = self.gif_src_edit.text()
-        if not path:
-            logger.warning("请先选择源文件")
-            return
+
+# ==================== 8. 智能图像分析器 ====================
+class ImageAnalyzer:
+    """智能分析图像质量，决定是否需要处理"""
+    
+    THRESHOLDS = {
+        "brightness": {"low": 80, "high": 180, "optimal_low": 100, "optimal_high": 160},
+        "contrast": {"low": 30, "high": 80, "optimal": 50},
+        "saturation": {"low": 40, "high": 180, "optimal": 100},
+        "sharpness": {"low": 100, "high": 800, "optimal": 300},
+        "noise": {"low": 5, "high": 30, "optimal": 15},
+        "block_artifact": {"low": 10, "high": 50, "optimal": 20},
+        "aliasing": {"low": 0.1, "high": 0.4, "optimal": 0.2},
+    }
+    
+    @staticmethod
+    def analyze(img):
+        """分析图像，返回各项指标"""
+        if img is None:
+            return {}
         
-        params = {
-            "model_name": self.gif_model.get_current_model(),
-            "num_threads": self.gif_threads.value(),
-            "fps": max(1, self.gif_fps.value()),
-            "frame_step": max(1, self.gif_step.value()),
-            "preserve_transparency": self.gif_transparency.isChecked(),
-            "remove_bg": self.gif_rembg.isChecked(),
-            "bg_type": self.gif_bg_type.currentText(),
-            "bg_color": self.gif_bg_color.get_color(),  # 【修复】使用颜色选择器
-            "cleanup_edge": self.gif_clean.isChecked(), 
-            "edge_feather": self.gif_feather.value(), 
-            "edge_blur": self.gif_blur.value(),
-            "edge_gamma": self.gif_gamma.value(),
-            "remove_isolated": self.gif_iso.isChecked(), 
-            "isolated_area": self.gif_iso_area.value(),
-            "remove_internal": self.gif_internal.isChecked(),
-            "internal_max_area": self.gif_internal_area.value(),
-        }
+        metrics = {}
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        metrics["brightness"] = np.mean(gray)
+        metrics["brightness_std"] = np.std(gray)
+        metrics["contrast"] = np.std(gray)
         
-        logger.info(f"开始生成 GIF: {path}")
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        metrics["saturation"] = np.mean(hsv[:,:,1])
         
-        out = Path(ConfigManager.get_output_path("gif")) / f"gif_{datetime.now():%H%M%S}.gif"
-        out.parent.mkdir(exist_ok=True)
+        laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+        metrics["sharpness"] = laplacian.var()
+        metrics["noise"] = ImageAnalyzer._estimate_noise(gray)
         
-        if self.gif_src_type.checkedButton().text() == "视频":
-            self.current_worker = VideoToGifWorker(path, str(out), params)
-        else:
-            self.current_worker = ImagesToGifWorker(path, str(out), params)
+        b, g, r = cv2.split(img)
+        metrics["color_temp"] = np.mean(r.astype(float) - b.astype(float))
+        metrics["highlight_ratio"] = np.sum(gray > 240) / gray.size
+        metrics["shadow_ratio"] = np.sum(gray < 15) / gray.size
+        metrics["block_artifact"] = ImageAnalyzer._estimate_block_artifact(gray)
+        metrics["aliasing"] = ImageAnalyzer._estimate_aliasing(gray)
+        
+        return metrics
+    
+    @staticmethod
+    def _estimate_noise(gray):
+        try:
+            kernel = np.array([[1, -2, 1], [-2, 4, -2], [1, -2, 1]])
+            filtered = cv2.filter2D(gray, -1, kernel)
+            noise = np.median(np.abs(filtered)) / 0.6745
+            return noise
+        except:
+            return 10
+    
+    @staticmethod
+    def _estimate_block_artifact(gray):
+        try:
+            h, w = gray.shape
+            block_size = 8
+            h_diff = 0
+            v_diff = 0
+            count = 0
             
-        self.current_worker.progress.connect(lambda v, m: [self.gif_prog.setValue(v), self.gif_prog.setFormat(m)])
-        self.current_worker.error.connect(lambda e: logger.error(e))
-        self.current_worker.finished.connect(lambda d: self.show_result_dialog(d['folder']))
-        self.current_worker.start()
-
-    def _on_ico_system_toggled(self, checked):
-        """系统 ICO 选中时自动勾选推荐尺寸"""
-        if checked:
-            recommended = [16, 24, 32, 48, 256]
-            for s, cb in self.ico_sizes.items():
-                if s in recommended:
-                    cb.setChecked(True)
-                # 不强制取消其他的，用户可能想保留
-
-    def single_run(self):
-        path = self.single_src_edit.text()
-        if not path:
-            logger.warning("请先选择图片文件")
-            return
+            for y in range(0, h - block_size, block_size):
+                for x in range(block_size, w - block_size, block_size):
+                    left = float(gray[y, x-1])
+                    right = float(gray[y, x])
+                    h_diff += abs(left - right)
+                    count += 1
+            
+            for y in range(block_size, h - block_size, block_size):
+                for x in range(0, w - block_size, block_size):
+                    top = float(gray[y-1, x])
+                    bottom = float(gray[y, x])
+                    v_diff += abs(top - bottom)
+                    count += 1
+            
+            if count > 0:
+                block_score = (h_diff + v_diff) / count
+            else:
+                block_score = 0
+            
+            return block_score
+        except:
+            return 20
+    
+    @staticmethod
+    def _estimate_aliasing(gray):
+        try:
+            sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+            sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+            edge_mag = np.sqrt(sobelx**2 + sobely**2)
+            edge_dir = np.arctan2(sobely, sobelx)
+            
+            dir_diff_x = np.abs(np.diff(edge_dir, axis=1))
+            dir_diff_y = np.abs(np.diff(edge_dir, axis=0))
+            
+            edge_mask = edge_mag > 30
+            edge_mask_x = edge_mask[:, :-1]
+            edge_mask_y = edge_mask[:-1, :]
+            
+            aliasing_x = np.mean(dir_diff_x[edge_mask_x]) if np.sum(edge_mask_x) > 0 else 0
+            aliasing_y = np.mean(dir_diff_y[edge_mask_y]) if np.sum(edge_mask_y) > 0 else 0
+            
+            aliasing_score = (aliasing_x + aliasing_y) / 2
+            return min(aliasing_score, 1.0)
+        except:
+            return 0.2
+    
+    @staticmethod
+    def get_recommendations(metrics):
+        """根据分析结果，返回处理建议"""
+        recommendations = {}
+        th = ImageAnalyzer.THRESHOLDS
         
-        params = {
-            "model_name": self.single_model.get_current_model(),
-            "cleanup_edge": self.single_clean.isChecked(),
-            "edge_feather": self.single_feather.value(), 
-            "edge_blur": self.single_blur.value(),
-            "edge_gamma": self.single_gamma.value(),
-            "remove_isolated": self.single_iso.isChecked(),
-            "isolated_area": self.single_iso_area.value(),
-            "remove_internal": self.single_internal.isChecked(),
-            "internal_max_area": self.single_internal_area.value(),
-            "bg_type": self.single_bg_type.currentText(),
-            "bg_color": self.single_bg_color.get_color(),  # 【修复】使用颜色选择器
-            "ico_enabled": self.ico_enabled.isChecked(),
-            "ico_sizes": [s for s, cb in self.ico_sizes.items() if cb.isChecked()],
-            "ico_transparent": self.ico_transparent.isChecked(),
-            "ico_opaque": self.ico_opaque.isChecked(),
-            "ico_png": self.ico_png.isChecked(),
-            "ico_system": self.ico_system.isChecked(),
+        brightness = metrics.get("brightness", 128)
+        if brightness < th["brightness"]["low"]:
+            recommendations["opt_bright"] = {"need": True, "reason": f"亮度过低({brightness:.0f})"}
+        elif brightness > th["brightness"]["high"]:
+            recommendations["opt_bright"] = {"need": False, "reason": f"亮度已足够", "skip": True}
+        else:
+            recommendations["opt_bright"] = {"need": False, "reason": f"亮度正常"}
+        
+        contrast = metrics.get("contrast", 50)
+        if contrast < th["contrast"]["low"]:
+            recommendations["opt_contrast"] = {"need": True, "reason": f"对比度过低({contrast:.0f})"}
+        elif contrast > th["contrast"]["high"]:
+            recommendations["opt_contrast"] = {"need": False, "reason": f"对比度已足够", "skip": True}
+        else:
+            recommendations["opt_contrast"] = {"need": False, "reason": f"对比度正常"}
+        
+        saturation = metrics.get("saturation", 100)
+        if saturation < th["saturation"]["low"]:
+            recommendations["opt_sat"] = {"need": True, "reason": f"饱和度过低({saturation:.0f})"}
+        elif saturation > th["saturation"]["high"]:
+            recommendations["opt_sat"] = {"need": False, "reason": f"饱和度已足够", "skip": True}
+        else:
+            recommendations["opt_sat"] = {"need": False, "reason": f"饱和度正常"}
+        
+        sharpness = metrics.get("sharpness", 300)
+        if sharpness < th["sharpness"]["low"]:
+            recommendations["opt_sharp"] = {"need": True, "reason": f"清晰度过低({sharpness:.0f})"}
+        elif sharpness > th["sharpness"]["high"]:
+            recommendations["opt_sharp"] = {"need": False, "reason": f"清晰度已足够", "skip": True}
+        else:
+            recommendations["opt_sharp"] = {"need": False, "reason": f"清晰度正常"}
+        
+        noise = metrics.get("noise", 15)
+        if noise > th["noise"]["high"]:
+            recommendations["opt_denoise"] = {"need": True, "reason": f"噪声过高({noise:.1f})"}
+        elif noise < th["noise"]["low"]:
+            recommendations["opt_denoise"] = {"need": False, "reason": f"噪声很低", "skip": True}
+        else:
+            recommendations["opt_denoise"] = {"need": False, "reason": f"噪声正常"}
+        
+        block_artifact = metrics.get("block_artifact", 20)
+        if block_artifact > th["block_artifact"]["high"]:
+            recommendations["detail_deblock"] = {"need": True, "reason": f"块状伪影严重({block_artifact:.1f})"}
+        elif block_artifact > th["block_artifact"]["optimal"]:
+            recommendations["detail_deblock"] = {"need": True, "reason": f"块状伪影中等({block_artifact:.1f})"}
+        else:
+            recommendations["detail_deblock"] = {"need": False, "reason": f"块状伪影较少", "skip": True}
+        
+        aliasing = metrics.get("aliasing", 0.2)
+        if aliasing > th["aliasing"]["high"]:
+            recommendations["detail_aa"] = {"need": True, "reason": f"锯齿明显({aliasing:.2f})"}
+        elif aliasing > th["aliasing"]["optimal"]:
+            recommendations["detail_aa"] = {"need": True, "reason": f"锯齿中等({aliasing:.2f})"}
+        else:
+            recommendations["detail_aa"] = {"need": False, "reason": f"锯齿较少", "skip": True}
+        
+        return recommendations
+
+
+# ==================== 9. 专业8步修复流程 ====================
+class ProfessionalRestorer:
+    """
+    专业8步修复流程 (2025年后期处理版)
+    """
+    
+    INTENSITY = {
+        "light": {
+            "deblock_strength": 0.5, "deblock_thresh": 18,
+            "deband_threshold": 10, "deband_dither": 0.4,
+            "pre_sharpen_contrast": 1.2, "pre_sharpen_strength": 70,
+            "contrast_rollback": 0.88,
+            "aa_strength": 0.6, "edge_refine": 0.5,
+            "denoise_strength": 0.4, "denoise_preserve": 0.9,
+            "face_strength": 0.4, "hair_protect": 0.9,
+            "final_sharp": 0.4,
+            "grain_strength": 2,
+        },
+        "medium": {
+            "deblock_strength": 0.7, "deblock_thresh": 14,
+            "deband_threshold": 7, "deband_dither": 0.55,
+            "pre_sharpen_contrast": 1.4, "pre_sharpen_strength": 100,
+            "contrast_rollback": 0.83,
+            "aa_strength": 0.75, "edge_refine": 0.65,
+            "denoise_strength": 0.55, "denoise_preserve": 0.82,
+            "face_strength": 0.5, "hair_protect": 0.85,
+            "final_sharp": 0.55,
+            "grain_strength": 4,
+        },
+        "heavy": {
+            "deblock_strength": 0.88, "deblock_thresh": 10,
+            "deband_threshold": 5, "deband_dither": 0.7,
+            "pre_sharpen_contrast": 1.6, "pre_sharpen_strength": 130,
+            "contrast_rollback": 0.78,
+            "aa_strength": 0.9, "edge_refine": 0.8,
+            "denoise_strength": 0.72, "denoise_preserve": 0.72,
+            "face_strength": 0.6, "hair_protect": 0.78,
+            "final_sharp": 0.7,
+            "grain_strength": 6,
+        },
+    }
+    
+    _frame_buffer = []
+    _max_buffer_size = 3
+    _face_cascade = None
+    _face_cascade_loaded = False
+    
+    @classmethod
+    def _load_face_cascade(cls):
+        if cls._face_cascade_loaded:
+            return cls._face_cascade
+        try:
+            cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+            cls._face_cascade = cv2.CascadeClassifier(cascade_path)
+            if cls._face_cascade.empty():
+                cls._face_cascade = None
+        except:
+            cls._face_cascade = None
+        cls._face_cascade_loaded = True
+        return cls._face_cascade
+    
+    @staticmethod
+    def detect_faces(img):
+        cascade = ProfessionalRestorer._load_face_cascade()
+        if cascade is None:
+            return []
+        try:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5,
+                                             minSize=(30, 30), flags=cv2.CASCADE_SCALE_IMAGE)
+            return faces.tolist() if len(faces) > 0 else []
+        except:
+            return []
+    
+    @staticmethod
+    def guided_filter(I, p, r, eps):
+        """引导滤波 - 边缘感知平滑"""
+        try:
+            I = I.astype(np.float64)
+            p = p.astype(np.float64)
+            mean_I = cv2.boxFilter(I, -1, (r, r))
+            mean_p = cv2.boxFilter(p, -1, (r, r))
+            mean_Ip = cv2.boxFilter(I * p, -1, (r, r))
+            cov_Ip = mean_Ip - mean_I * mean_p
+            mean_II = cv2.boxFilter(I * I, -1, (r, r))
+            var_I = mean_II - mean_I * mean_I
+            a = cov_Ip / (var_I + eps)
+            b = mean_p - a * mean_I
+            mean_a = cv2.boxFilter(a, -1, (r, r))
+            mean_b = cv2.boxFilter(b, -1, (r, r))
+            q = mean_a * I + mean_b
+            return q
+        except:
+            return p
+    
+    @staticmethod
+    def step1_artifact_removal(img, intensity="medium"):
+        """步骤1: 伪影移除 - 去块、去色带"""
+        cfg = ProfessionalRestorer.INTENSITY.get(intensity, ProfessionalRestorer.INTENSITY["medium"])
+        
+        try:
+            h, w = img.shape[:2]
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            
+            edges = cv2.Canny(gray.astype(np.uint8), 45, 110)
+            edge_protect = cv2.dilate(edges, np.ones((5, 5), np.uint8), iterations=1)
+            edge_protect_mask = 1 - edge_protect.astype(np.float32) / 255.0
+            
+            block_mask = np.zeros((h, w), dtype=np.float32)
+            thresh = cfg["deblock_thresh"]
+            
+            for block_size in [8, 16]:
+                for x in range(block_size, w - 1, block_size):
+                    if x >= w - 1:
+                        continue
+                    left = gray[:, x-1]
+                    right = gray[:, x]
+                    diff = np.abs(left - right)
+                    boundary = ((diff > 1.5) & (diff < thresh)).astype(np.float32)
+                    for dx in range(-2, 3):
+                        if 0 <= x + dx < w:
+                            weight = 1.0 - abs(dx) * 0.2
+                            block_mask[:, x + dx] = np.maximum(block_mask[:, x + dx], boundary * weight)
+                
+                for y in range(block_size, h - 1, block_size):
+                    if y >= h - 1:
+                        continue
+                    top = gray[y-1, :]
+                    bottom = gray[y, :]
+                    diff = np.abs(top - bottom)
+                    boundary = ((diff > 1.5) & (diff < thresh)).astype(np.float32)
+                    for dy in range(-2, 3):
+                        if 0 <= y + dy < h:
+                            weight = 1.0 - abs(dy) * 0.2
+                            block_mask[y + dy, :] = np.maximum(block_mask[y + dy, :], boundary * weight)
+            
+            block_mask = block_mask * edge_protect_mask
+            block_mask = cv2.GaussianBlur(block_mask, (5, 5), 1.0)
+            
+            strength = cfg["deblock_strength"]
+            gray_guide = gray / 255.0
+            smooth = np.zeros_like(img, dtype=np.float64)
+            for c in range(3):
+                channel = img[:, :, c].astype(np.float64) / 255.0
+                smooth[:, :, c] = ProfessionalRestorer.guided_filter(gray_guide, channel, 5, 0.01) * 255.0
+            smooth = np.clip(smooth, 0, 255).astype(np.uint8)
+            
+            block_mask_3ch = np.stack([block_mask] * 3, axis=-1)
+            result = img.astype(np.float32) * (1 - block_mask_3ch * strength) + \
+                     smooth.astype(np.float32) * (block_mask_3ch * strength)
+            result = np.clip(result, 0, 255).astype(np.uint8)
+            
+            deband_thresh = cfg["deband_threshold"]
+            dither = cfg["deband_dither"]
+            
+            local_var = cv2.blur(gray**2, (9, 9)) - cv2.blur(gray, (9, 9))**2
+            local_var = np.sqrt(np.maximum(local_var, 0))
+            banding_mask = (local_var < deband_thresh).astype(np.float32)
+            banding_mask = banding_mask * edge_protect_mask
+            banding_mask = cv2.GaussianBlur(banding_mask, (11, 11), 2.5)
+            
+            result_f = result.astype(np.float32)
+            for c in range(3):
+                channel = result_f[:, :, c]
+                smoothed = cv2.GaussianBlur(channel, (15, 15), 3.0)
+                noise = np.random.normal(0, dither, channel.shape).astype(np.float32)
+                smoothed = smoothed + noise
+                result_f[:, :, c] = channel * (1 - banding_mask * 0.65) + smoothed * (banding_mask * 0.65)
+            
+            return np.clip(result_f, 0, 255).astype(np.uint8)
+        except:
+            return img
+    
+    @staticmethod
+    def step2_presharpen_with_rollback(img, intensity="medium", metrics=None):
+        """步骤2: 预锐化+回调"""
+        cfg = ProfessionalRestorer.INTENSITY.get(intensity, ProfessionalRestorer.INTENSITY["medium"])
+        
+        contrast_factor = cfg["pre_sharpen_contrast"]
+        rollback = cfg["contrast_rollback"]
+        
+        if metrics:
+            src_contrast = metrics.get("contrast", 50)
+            if src_contrast > 60:
+                contrast_factor = 1.0 + (contrast_factor - 1.0) * 0.5
+                rollback = 1.0 - (1.0 - rollback) * 0.5
+        
+        try:
+            lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
+            l_channel = lab[:, :, 0]
+            mid = 128
+            l_enhanced = mid + (l_channel - mid) * contrast_factor
+            l_enhanced = np.clip(l_enhanced, 0, 255)
+            lab[:, :, 0] = l_enhanced
+            result = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+            
+            strength = cfg["pre_sharpen_strength"] / 100.0
+            blur = cv2.GaussianBlur(result, (0, 0), 2.0)
+            result = cv2.addWeighted(result, 1 + strength, blur, -strength, 0)
+            
+            lab = cv2.cvtColor(result, cv2.COLOR_BGR2LAB).astype(np.float32)
+            l_channel = lab[:, :, 0]
+            l_adjusted = mid + (l_channel - mid) * rollback
+            lab[:, :, 0] = np.clip(l_adjusted, 0, 255)
+            result = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+            
+            return result
+        except:
+            return img
+    
+    @staticmethod
+    def step3_antialiasing(img, intensity="medium"):
+        """步骤3: 反锯齿 + 边缘精修"""
+        cfg = ProfessionalRestorer.INTENSITY.get(intensity, ProfessionalRestorer.INTENSITY["medium"])
+        
+        try:
+            h, w = img.shape[:2]
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float64)
+            
+            sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+            sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+            gradient_mag = np.sqrt(sobel_x**2 + sobel_y**2)
+            gradient_dir = np.arctan2(sobel_y, sobel_x)
+            edge_strength = np.clip(gradient_mag / 80.0, 0, 1)
+            
+            diff_h = np.abs(np.diff(gray, axis=1, prepend=gray[:, :1]))
+            diff_v = np.abs(np.diff(gray, axis=0, prepend=gray[:1, :]))
+            step_thresh = 8
+            jagged_h = (diff_h > step_thresh).astype(np.float64) * edge_strength
+            jagged_v = (diff_v > step_thresh).astype(np.float64) * edge_strength
+            
+            abs_dir = np.abs(gradient_dir)
+            near_horizontal = ((abs_dir < 0.3) | (abs_dir > np.pi - 0.3)).astype(np.float64)
+            near_vertical = (np.abs(abs_dir - np.pi/2) < 0.3).astype(np.float64)
+            
+            result = img.astype(np.float64)
+            aa_strength = cfg["aa_strength"]
+            
+            h_mask = jagged_v * near_horizontal
+            if np.sum(h_mask) > 100:
+                v_kernel = np.array([[0.15], [0.20], [0.30], [0.20], [0.15]])
+                v_interp = cv2.filter2D(result, -1, v_kernel)
+                h_mask_3ch = np.stack([h_mask] * 3, axis=-1)
+                result = result + (v_interp - result) * h_mask_3ch * aa_strength * 0.5
+            
+            v_mask = jagged_h * near_vertical
+            if np.sum(v_mask) > 100:
+                h_kernel = np.array([[0.15, 0.20, 0.30, 0.20, 0.15]])
+                h_interp = cv2.filter2D(result, -1, h_kernel)
+                v_mask_3ch = np.stack([v_mask] * 3, axis=-1)
+                result = result + (h_interp - result) * v_mask_3ch * aa_strength * 0.5
+            
+            edge_refine = cfg["edge_refine"]
+            edge_region = (edge_strength > 0.2).astype(np.float64)
+            edge_region = cv2.GaussianBlur(edge_region, (3, 3), 0.5)
+            
+            tangent_smooth = cv2.GaussianBlur(result, (3, 3), 0.5)
+            edge_3ch = np.stack([edge_region] * 3, axis=-1)
+            result = result * (1 - edge_3ch * edge_refine * 0.15) + \
+                    tangent_smooth * (edge_3ch * edge_refine * 0.15)
+            
+            return np.clip(result, 0, 255).astype(np.uint8)
+        except:
+            return img
+    
+    @staticmethod
+    def step4_denoise(img, intensity="medium", metrics=None):
+        """步骤4: 去噪"""
+        cfg = ProfessionalRestorer.INTENSITY.get(intensity, ProfessionalRestorer.INTENSITY["medium"])
+        
+        try:
+            strength = cfg["denoise_strength"]
+            preserve = cfg["denoise_preserve"]
+            
+            denoised = cv2.bilateralFilter(img, 9, 45, 45)
+            
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            local_var = cv2.blur(gray**2, (7, 7)) - cv2.blur(gray, (7, 7))**2
+            local_var = np.sqrt(np.maximum(local_var, 0))
+            texture_mask = (local_var > 12).astype(np.float32)
+            texture_mask = cv2.GaussianBlur(texture_mask, (5, 5), 1.0)
+            
+            denoise_mask = (1 - texture_mask * preserve) * strength
+            denoise_mask_3ch = np.stack([denoise_mask] * 3, axis=-1)
+            
+            result = img.astype(np.float32) * (1 - denoise_mask_3ch) + \
+                    denoised.astype(np.float32) * denoise_mask_3ch
+            
+            return np.clip(result, 0, 255).astype(np.uint8)
+        except:
+            return img
+    
+    @staticmethod
+    def step5_face_repair(img, intensity="medium"):
+        """步骤5: 人脸修复"""
+        cfg = ProfessionalRestorer.INTENSITY.get(intensity, ProfessionalRestorer.INTENSITY["medium"])
+        
+        faces = ProfessionalRestorer.detect_faces(img)
+        if not faces:
+            return img
+        
+        result = img.copy()
+        
+        try:
+            for (x, y, fw, fh) in faces:
+                padding = int(max(fw, fh) * 0.2)
+                x1, y1 = max(0, x - padding), max(0, y - padding)
+                x2, y2 = min(img.shape[1], x + fw + padding), min(img.shape[0], y + fh + padding)
+                
+                face_region = result[y1:y2, x1:x2].copy()
+                
+                face_f = face_region.astype(np.float64)
+                low_freq = cv2.GaussianBlur(face_f, (0, 0), 2.0)
+                high_freq = face_f - low_freq
+                
+                low_smooth = cv2.bilateralFilter(low_freq.astype(np.uint8), 7, 35, 35)
+                
+                high_preserve = 1 - cfg["face_strength"] * 0.3
+                face_result = low_smooth.astype(np.float64) + high_freq * high_preserve
+                face_result = np.clip(face_result, 0, 255).astype(np.uint8)
+                
+                hsv = cv2.cvtColor(face_region, cv2.COLOR_BGR2HSV)
+                skin_mask = cv2.inRange(hsv, np.array([0, 20, 70]), np.array([20, 255, 255]))
+                skin_mask = cv2.GaussianBlur(skin_mask, (15, 15), 3.0)
+                skin_mask = skin_mask.astype(np.float32) / 255.0 * cfg["face_strength"]
+                skin_mask_3ch = np.stack([skin_mask] * 3, axis=-1)
+                
+                border = int(min(y2-y1, x2-x1) * 0.15)
+                transition = np.ones((y2-y1, x2-x1), dtype=np.float32)
+                for i in range(border):
+                    factor = i / border
+                    transition[i, :] *= factor
+                    transition[-(i+1), :] *= factor
+                    transition[:, i] *= factor
+                    transition[:, -(i+1)] *= factor
+                transition_3ch = np.stack([transition] * 3, axis=-1)
+                
+                face_blended = face_region.astype(np.float32) * (1 - skin_mask_3ch) + \
+                              face_result.astype(np.float32) * skin_mask_3ch
+                
+                final_blend = result[y1:y2, x1:x2].astype(np.float32) * (1 - transition_3ch) + \
+                             face_blended * transition_3ch
+                result[y1:y2, x1:x2] = np.clip(final_blend, 0, 255).astype(np.uint8)
+            
+            return result
+        except:
+            return img
+    
+    @staticmethod
+    def step6_hair_protect(img, original, intensity="medium"):
+        """步骤6: 毛发保护"""
+        cfg = ProfessionalRestorer.INTENSITY.get(intensity, ProfessionalRestorer.INTENSITY["medium"])
+        
+        faces = ProfessionalRestorer.detect_faces(img)
+        if not faces:
+            return img
+        
+        result = img.copy()
+        
+        try:
+            h, w = result.shape[:2]
+            hair_mask = np.zeros((h, w), dtype=np.float32)
+            
+            for (x, y, fw, fh) in faces:
+                hair_top = max(0, y - int(fh * 1.2))
+                hair_bottom = y + int(fh * 0.1)
+                hair_left = max(0, x - int(fw * 0.25))
+                hair_right = min(w, x + fw + int(fw * 0.25))
+                hair_mask[hair_top:hair_bottom, hair_left:hair_right] = 1.0
+            
+            hair_mask = cv2.GaussianBlur(hair_mask, (15, 15), 4.0)
+            
+            sigma = 1.2
+            blur = cv2.GaussianBlur(original, (0, 0), sigma)
+            hair_detail = original.astype(np.float32) - blur.astype(np.float32)
+            
+            hair_protect = cfg["hair_protect"]
+            hair_mask_3ch = np.stack([hair_mask] * 3, axis=-1)
+            result = result.astype(np.float32) + hair_detail * hair_mask_3ch * hair_protect * 0.4
+            
+            return np.clip(result, 0, 255).astype(np.uint8)
+        except:
+            return img
+    
+    @staticmethod
+    def step7_final_sharpen(img, intensity="medium", metrics=None):
+        """步骤7: 最终轻锐化"""
+        cfg = ProfessionalRestorer.INTENSITY.get(intensity, ProfessionalRestorer.INTENSITY["medium"])
+        
+        if metrics:
+            sharpness = metrics.get("sharpness", 300)
+            if sharpness > 600:
+                return img
+        
+        try:
+            strength = cfg["final_sharp"] * 0.4
+            
+            blur = cv2.GaussianBlur(img, (0, 0), 1.0)
+            diff = img.astype(np.float64) - blur.astype(np.float64)
+            
+            max_diff = 15
+            diff_limited = np.tanh(diff / max_diff) * max_diff
+            
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            sobel_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+            sobel_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+            gradient = np.sqrt(sobel_x**2 + sobel_y**2)
+            edge_strength = np.clip(gradient / 50.0, 0, 1)
+            edge_strength_3ch = np.stack([edge_strength] * 3, axis=-1)
+            
+            result = img.astype(np.float64) + diff_limited * edge_strength_3ch * strength
+            
+            return np.clip(result, 0, 255).astype(np.uint8)
+        except:
+            return img
+    
+    @staticmethod
+    def step8_add_grain(img, intensity="medium"):
+        """步骤8: 轻微加颗粒"""
+        cfg = ProfessionalRestorer.INTENSITY.get(intensity, ProfessionalRestorer.INTENSITY["medium"])
+        
+        try:
+            strength = cfg["grain_strength"]
+            
+            noise = np.random.normal(0, strength, img.shape).astype(np.float32)
+            
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            mask = cv2.threshold(gray, 25, 1, cv2.THRESH_BINARY)[1].astype(np.float32)
+            mask = cv2.GaussianBlur(mask, (0, 0), 5)
+            mask_3ch = np.stack([mask] * 3, axis=-1)
+            
+            result = img.astype(np.float32) + noise * mask_3ch
+            
+            return np.clip(result, 0, 255).astype(np.uint8)
+        except:
+            return img
+    
+    @classmethod
+    def temporal_stabilize(cls, current_frame, weight=0.2):
+        """时序稳定"""
+        try:
+            cls._frame_buffer.append(current_frame.copy())
+            if len(cls._frame_buffer) > cls._max_buffer_size:
+                cls._frame_buffer.pop(0)
+            
+            if len(cls._frame_buffer) < 2:
+                return current_frame
+            
+            result = current_frame.astype(np.float32)
+            total_weight = 1.0
+            
+            for i, frame in enumerate(cls._frame_buffer[:-1]):
+                frame_weight = weight * (0.5 ** (len(cls._frame_buffer) - 1 - i))
+                diff = np.abs(current_frame.astype(np.float32) - frame.astype(np.float32))
+                diff_gray = np.mean(diff, axis=2)
+                stable_mask = (diff_gray < 25).astype(np.float32)
+                stable_mask = cv2.GaussianBlur(stable_mask, (9, 9), 2.0)
+                stable_mask_3ch = np.stack([stable_mask] * 3, axis=-1)
+                result = result + frame.astype(np.float32) * frame_weight * stable_mask_3ch
+                total_weight = total_weight + frame_weight * stable_mask_3ch
+            
+            result = result / total_weight
+            return np.clip(result, 0, 255).astype(np.uint8)
+        except:
+            return current_frame
+    
+    @classmethod
+    def clear_frame_buffer(cls):
+        cls._frame_buffer = []
+
+
+# ==================== 10. 并行处理管理器 ====================
+class ParallelProcessor:
+    """并行处理管理器"""
+    
+    def __init__(self, max_workers=None, resource_ratio=0.7):
+        if max_workers is None:
+            cores = os.cpu_count() or 4
+            max_workers = max(2, int(cores * resource_ratio))
+        self.max_workers = min(max_workers, 8)
+        self.resource_ratio = resource_ratio
+    
+    def process_frame_parallel(self, img, opts, intensity, metrics, original):
+        """并行处理单帧的多个后期效果"""
+        result = img.copy()
+        
+        if opts.get("detail_deblock", False):
+            result = ProfessionalRestorer.step1_artifact_removal(result, intensity)
+        
+        if opts.get("detail_presharpen", False):
+            result = ProfessionalRestorer.step2_presharpen_with_rollback(result, intensity, metrics)
+        
+        stage3_results = {}
+        
+        def do_aa():
+            if opts.get("detail_aa", False):
+                return ("aa", ProfessionalRestorer.step3_antialiasing(result, intensity))
+            return None
+        
+        def do_denoise():
+            if opts.get("detail_denoise", False):
+                return ("denoise", ProfessionalRestorer.step4_denoise(result, intensity, metrics))
+            return None
+        
+        with ThreadPoolExecutor(max_workers=min(2, self.max_workers)) as executor:
+            futures = [executor.submit(do_aa), executor.submit(do_denoise)]
+            for future in as_completed(futures):
+                res = future.result()
+                if res:
+                    stage3_results[res[0]] = res[1]
+        
+        if "aa" in stage3_results:
+            result = stage3_results["aa"]
+        if "denoise" in stage3_results:
+            aa_result = stage3_results.get("aa", result)
+            denoise_result = stage3_results["denoise"]
+            gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            edge = cv2.Canny(gray.astype(np.uint8), 50, 150)
+            edge_mask = cv2.dilate(edge, np.ones((3,3), np.uint8))
+            edge_mask = cv2.GaussianBlur(edge_mask.astype(np.float32), (5,5), 1.0) / 255.0
+            edge_mask_3ch = np.stack([edge_mask] * 3, axis=-1)
+            result = (aa_result.astype(np.float32) * edge_mask_3ch + 
+                     denoise_result.astype(np.float32) * (1 - edge_mask_3ch))
+            result = np.clip(result, 0, 255).astype(np.uint8)
+        
+        if opts.get("detail_face", False):
+            result = ProfessionalRestorer.step5_face_repair(result, intensity)
+        
+        if opts.get("detail_hair", False):
+            result = ProfessionalRestorer.step6_hair_protect(result, original, intensity)
+        
+        if opts.get("detail_final_sharp", False):
+            has_other_sharp = opts.get("opt_sharp", False)
+            if not has_other_sharp:
+                result = ProfessionalRestorer.step7_final_sharpen(result, intensity, metrics)
+        
+        if opts.get("detail_grain", False):
+            result = ProfessionalRestorer.step8_add_grain(result, intensity)
+        
+        return result
+
+
+# ==================== 11. 图像处理器 (智能后期) ====================
+class ImageProcessor:
+    """智能后期处理器"""
+    
+    INTENSITY = {
+        "original": {"bright": 10, "contrast": 1.15, "sat": 1.3, "sharp": 0.5, "grain": 4.5, "denoise": 5},
+        "light": {"bright": 5, "contrast": 1.08, "sat": 1.15, "sharp": 0.3, "grain": 2.5, "denoise": 3},
+        "medium": {"bright": 10, "contrast": 1.15, "sat": 1.30, "sharp": 0.5, "grain": 4.5, "denoise": 5},
+        "heavy": {"bright": 18, "contrast": 1.25, "sat": 1.45, "sharp": 0.7, "grain": 6.5, "denoise": 8},
+    }
+    
+    @staticmethod
+    def apply_basic_parallel(img, opts, intensity="medium", metrics=None, smart_mode=False):
+        """并行应用基础后期处理"""
+        cfg = ImageProcessor.INTENSITY.get(intensity, ImageProcessor.INTENSITY["medium"])
+        result = img.copy()
+        
+        tasks = []
+        
+        if opts.get('opt_bright'):
+            if not smart_mode or not metrics or metrics.get("brightness", 128) < 160:
+                tasks.append(("bright", cfg["bright"]))
+        
+        if opts.get('opt_contrast'):
+            if not smart_mode or not metrics or metrics.get("contrast", 50) < 70:
+                tasks.append(("contrast", cfg["contrast"]))
+        
+        if opts.get('opt_sat'):
+            if not smart_mode or not metrics or metrics.get("saturation", 100) < 150:
+                tasks.append(("sat", cfg["sat"]))
+        
+        if opts.get('opt_temp'):
+            tasks.append(("temp", None))
+        
+        if opts.get('opt_highlight'):
+            tasks.append(("highlight", None))
+        
+        for task, param in tasks:
+            if task == "bright":
+                result = cv2.convertScaleAbs(result, alpha=1.0, beta=param)
+            elif task == "contrast":
+                result = cv2.convertScaleAbs(result, alpha=param, beta=-5)
+            elif task == "sat":
+                hsv = cv2.cvtColor(result, cv2.COLOR_BGR2HSV).astype("float32")
+                hsv[:,:,1] = np.clip(hsv[:,:,1] * param, 0, 255)
+                result = cv2.cvtColor(hsv.astype("uint8"), cv2.COLOR_HSV2BGR)
+            elif task == "temp":
+                b, g, r = cv2.split(result)
+                b = cv2.add(b, 8)
+                r = cv2.subtract(r, 5)
+                result = cv2.merge((b, g, r))
+            elif task == "highlight":
+                lab = cv2.cvtColor(result, cv2.COLOR_BGR2LAB)
+                l, a, b_ch = cv2.split(lab)
+                l = cv2.add(l, 10)
+                result = cv2.cvtColor(cv2.merge((l, a, b_ch)), cv2.COLOR_LAB2BGR)
+        
+        return result
+    
+    @staticmethod
+    def apply_advanced_parallel(img, opts, intensity="medium", metrics=None, smart_mode=False):
+        """并行应用高级后期处理"""
+        cfg = ImageProcessor.INTENSITY.get(intensity, ImageProcessor.INTENSITY["medium"])
+        result = img.copy()
+        
+        def should_apply(key):
+            if not opts.get(key):
+                return False
+            if smart_mode and metrics:
+                recommendations = ImageAnalyzer.get_recommendations(metrics)
+                rec = recommendations.get(key, {})
+                if rec.get("skip"):
+                    return False
+            return True
+        
+        if should_apply('opt_auto_wb'):
+            lab = cv2.cvtColor(result, cv2.COLOR_BGR2LAB).astype(np.float32)
+            avg_a, avg_b = np.average(lab[:,:,1]), np.average(lab[:,:,2])
+            lab[:,:,1] = lab[:,:,1] - ((avg_a - 128) * (lab[:,:,0] / 255.0) * 1.1)
+            lab[:,:,2] = lab[:,:,2] - ((avg_b - 128) * (lab[:,:,0] / 255.0) * 1.1)
+            result = cv2.cvtColor(np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
+        
+        if should_apply('opt_auto_levels'):
+            for i in range(3):
+                ch = result[:,:,i]
+                lo, hi = np.percentile(ch, [1, 99])
+                if hi > lo:
+                    result[:,:,i] = np.clip((ch - lo) * 255.0 / (hi - lo), 0, 255).astype(np.uint8)
+        
+        if should_apply('opt_shadow'):
+            hsv = cv2.cvtColor(result, cv2.COLOR_BGR2HSV).astype(np.float32)
+            v = hsv[:,:,2]
+            mask = np.power(1 - v/255.0, 2)
+            hsv[:,:,2] = np.clip(v + 25 * mask, 0, 255)
+            result = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+        
+        if should_apply('opt_highlight_rec'):
+            hsv = cv2.cvtColor(result, cv2.COLOR_BGR2HSV).astype(np.float32)
+            v = hsv[:,:,2]
+            mask = np.power(v/255.0, 3)
+            hsv[:,:,2] = np.clip(v - 20 * mask, 0, 255)
+            result = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+        
+        if should_apply('opt_denoise'):
+            denoise_val = cfg.get("denoise", 5)
+            result = cv2.fastNlMeansDenoisingColored(result, None, denoise_val, denoise_val, 7, 21)
+        
+        if should_apply('opt_dehaze'):
+            result = ImageProcessor._dehaze(result)
+        
+        return result
+    
+    @staticmethod
+    def _dehaze(img, strength=0.85):
+        img_f = img.astype(np.float64) / 255.0
+        dark = np.min(img_f, axis=2)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+        dark = cv2.erode(dark, kernel)
+        h, w = img.shape[:2]
+        flat = dark.flatten()
+        n = max(1, int(h*w*0.001))
+        idx = np.argsort(flat)[-n:]
+        A = np.mean(img_f.reshape(-1, 3)[idx], axis=0)
+        A = np.clip(A, 0.1, 1.0)
+        trans = 1 - strength * cv2.erode(np.min(img_f / np.maximum(A, 0.01), axis=2), kernel)
+        trans = np.clip(trans, 0.1, 1.0)
+        result = np.zeros_like(img_f)
+        for i in range(3):
+            result[:,:,i] = (img_f[:,:,i] - A[i]) / np.maximum(trans, 0.1) + A[i]
+        return np.clip(result * 255, 0, 255).astype(np.uint8)
+    
+    @staticmethod
+    def apply_filters(img, opts, intensity="medium"):
+        """应用滤镜效果"""
+        cfg = ImageProcessor.INTENSITY.get(intensity, ImageProcessor.INTENSITY["medium"])
+        result = img.copy()
+        
+        if opts.get('opt_sharp'):
+            gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
+            mask = cv2.threshold(gray, 25, 1, cv2.THRESH_BINARY)[1].astype(np.float32)
+            mask = cv2.GaussianBlur(mask, (0,0), 5)
+            mask3 = cv2.merge([mask, mask, mask])
+            
+            blur = cv2.GaussianBlur(result, (0,0), 2.0)
+            unsharp = cv2.addWeighted(result, 1 + cfg["sharp"], blur, -cfg["sharp"], 0)
+            result = np.clip(result * (1 - mask3) + unsharp * mask3, 0, 255).astype(np.uint8)
+        
+        if opts.get('opt_landscape'):
+            result = cv2.convertScaleAbs(result, alpha=1.1, beta=0)
+            hsv = cv2.cvtColor(result, cv2.COLOR_BGR2HSV).astype("float32")
+            hsv[:,:,1] = np.clip(hsv[:,:,1] * 1.2, 0, 255)
+            result = cv2.cvtColor(hsv.astype("uint8"), cv2.COLOR_HSV2BGR)
+            b, g, r = cv2.split(result)
+            b = cv2.add(b, 12)
+            result = cv2.merge((b, g, r))
+        
+        if opts.get('opt_vintage'):
+            img_f = result.astype(np.float32) / 255.0
+            b, g, r = cv2.split(img_f)
+            b = b + (1.0 - b) * 0.2 * (1.0 - r)
+            r = r + r * 0.2
+            result = (np.clip(cv2.merge((b, g, r)), 0, 1) * 255).astype(np.uint8)
+        
+        if opts.get('opt_cinematic'):
+            b, g, r = cv2.split(result.astype(np.float32))
+            gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+            b = b + (1 - gray) * 15 * 0.25
+            r = r + gray * 10 * 0.25
+            result = np.clip(cv2.merge((b, g, r)), 0, 255).astype(np.uint8)
+        
+        if opts.get('opt_anime_enhance'):
+            smoothed = cv2.bilateralFilter(result, 9, 75, 75)
+            hsv = cv2.cvtColor(smoothed, cv2.COLOR_BGR2HSV).astype(np.float32)
+            hsv[:,:,1] = np.clip(hsv[:,:,1] * 1.2, 0, 255)
+            result = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+        
+        if opts.get('opt_grain'):
+            gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
+            mask = cv2.threshold(gray, 25, 1, cv2.THRESH_BINARY)[1].astype(np.float32)
+            mask = cv2.GaussianBlur(mask, (0,0), 5)
+            mask3 = cv2.merge([mask, mask, mask])
+            noise = np.random.normal(0, cfg["grain"], result.shape).astype(np.float32)
+            result = np.clip(result.astype(np.float32) + noise * mask3, 0, 255).astype(np.uint8)
+        
+        return result
+
+
+# ==================== 12. 音频处理 ====================
+class AudioHandler:
+    @staticmethod
+    def _get_ffmpeg():
+        exe = PM.get_exe("ffmpeg")
+        return exe if exe and os.path.isfile(exe) else "ffmpeg"
+    
+    @staticmethod
+    def extract(video, audio):
+        try:
+            ffmpeg = AudioHandler._get_ffmpeg()
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            subprocess.run([ffmpeg, '-i', video, '-vn', '-acodec', 'copy', '-y', audio],
+                         capture_output=True, startupinfo=si, timeout=60)
+            return os.path.exists(audio) and os.path.getsize(audio) > 0
+        except:
+            return False
+    
+    # ==================== 4. 替换 AudioHandler 类的 merge_h264 方法 ====================
+    @staticmethod
+    def merge_h264(video_frames_dir, audio, output, fps, width, height):
+        """使用FFmpeg的H.264编码合并视频 - 2025万能兼容版"""
+        try:
+            ffmpeg = AudioHandler._get_ffmpeg()
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            
+            if not os.path.isfile(ffmpeg):
+                print(f"[FFmpeg错误] FFmpeg不存在: {ffmpeg}")
+                return False
+            
+            first_frame = os.path.join(video_frames_dir, 'frame_000000.png')
+            if not os.path.exists(first_frame):
+                print(f"[FFmpeg错误] 帧文件不存在: {first_frame}")
+                return False
+            
+            # GOP大小：30fps用90，60fps用180
+            gop_size = 90 if fps <= 30 else 180
+            keyint_min = 30 if fps <= 30 else 60
+            
+            cmd = [
+                ffmpeg,
+                '-y',
+                '-framerate', str(fps),
+                '-i', os.path.join(video_frames_dir, 'frame_%06d.png'),
+            ]
+            
+            if audio and os.path.exists(audio):
+                cmd.extend(['-i', audio])
+            
+            # 2025万能兼容参数
+            cmd.extend([
+                '-c:v', 'libx264',
+                '-profile:v', 'main',
+                '-level', '4.0',
+                '-preset', 'medium',
+                '-crf', '23',                    # 画质优秀，体积更小
+                '-pix_fmt', 'yuv420p',
+                '-g', str(gop_size),             # 关键帧间隔
+                '-keyint_min', str(keyint_min),
+                '-bf', '2',
+                '-movflags', '+faststart',       # 网页秒开必加
+            ])
+            
+            if audio and os.path.exists(audio):
+                cmd.extend([
+                    '-c:a', 'aac',
+                    '-b:a', '128k',
+                    '-ac', '2',
+                ])
+            
+            cmd.append(output)
+            
+            print(f"[FFmpeg] 万能兼容编码中...")
+            
+            result = subprocess.run(
+                cmd, 
+                capture_output=True, 
+                startupinfo=si, 
+                timeout=600,
+                text=True,
+                encoding='utf-8',
+                errors='ignore'
+            )
+            
+            if result.returncode != 0:
+                print(f"[FFmpeg错误] 返回码: {result.returncode}")
+                print(f"[FFmpeg stderr] {result.stderr[:500] if result.stderr else '无'}")
+                return False
+            
+            if os.path.exists(output) and os.path.getsize(output) > 1000:
+                print(f"[FFmpeg] 编码成功: {output}")
+                return True
+            else:
+                print(f"[FFmpeg错误] 输出文件无效")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            print("[FFmpeg错误] 编码超时")
+            return False
+        except Exception as e:
+            print(f"[FFmpeg错误] 异常: {e}")
+            return False
+    
+    @staticmethod
+    def merge(video, audio, output):
+        """合并视频和音频"""
+        try:
+            ffmpeg = AudioHandler._get_ffmpeg()
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            subprocess.run([ffmpeg, '-i', video, '-i', audio, '-c:v', 'copy',
+                          '-c:a', 'aac', '-strict', 'experimental', '-y', output],
+                         capture_output=True, startupinfo=si, timeout=120)
+            return os.path.exists(output)
+        except:
+            return False
+    
+    # ==================== 5. 替换 AudioHandler 类的 encode_h264 方法 ====================
+    @staticmethod
+    def encode_h264(input_raw, output, fps):
+        """将原始视频重新编码为H.264 - 2025万能兼容版"""
+        try:
+            ffmpeg = AudioHandler._get_ffmpeg()
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            
+            gop_size = 90 if fps <= 30 else 180
+            keyint_min = 30 if fps <= 30 else 60
+            
+            cmd = [
+                ffmpeg,
+                '-y',
+                '-i', input_raw,
+                '-c:v', 'libx264',
+                '-profile:v', 'main',
+                '-level', '4.0',
+                '-preset', 'medium',
+                '-crf', '23',
+                '-pix_fmt', 'yuv420p',
+                '-g', str(gop_size),
+                '-keyint_min', str(keyint_min),
+                '-bf', '2',
+                '-movflags', '+faststart',
+                '-c:a', 'aac',
+                '-b:a', '128k',
+                '-ac', '2',
+                output
+            ]
+            
+            subprocess.run(cmd, capture_output=True, startupinfo=si, timeout=600)
+            return os.path.exists(output)
+        except:
+            return False
+
+# ==================== 13. 视频处理管线 ====================
+STOP_FLAG = False
+PAUSE_FLAG = False
+
+class VideoPipeline:
+    """视频处理管线 - H.264编码优化版"""
+    
+    def __init__(self, task, log_func, gpu_info, resource_ratio=0.7):
+        self.task = task
+        self.log = log_func
+        self.resource_ratio = resource_ratio
+        self.sample_metrics = None
+        self.smart_mode = task.smart_mode
+        
+        cores = gpu_info.get("cores", 4)
+        self.max_workers = max(2, min(8, int(cores * resource_ratio)))
+        self.parallel_processor = ParallelProcessor(self.max_workers, resource_ratio)
+    
+    def run(self, progress_cb, time_cb=None, status_cb=None):
+        global STOP_FLAG, PAUSE_FLAG
+        start_time = time.time()
+        temp_dir = tempfile.mkdtemp()
+        audio_path = os.path.join(temp_dir, "audio.aac")
+        frames_dir = os.path.join(temp_dir, "frames")
+        temp_video = os.path.join(temp_dir, "temp_raw.mp4")
+        os.makedirs(frames_dir, exist_ok=True)
+        
+        try:
+            has_audio = AudioHandler.extract(self.task.input_path, audio_path)
+            self.log(f"音频: {'有' if has_audio else '无'}")
+            
+            cap = cv2.VideoCapture(self.task.input_path)
+            fps = cap.get(cv2.CAP_PROP_FPS) or 25
+            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            
+            self.task.total_frames = total
+            self.log(f"视频: {w}x{h}, {fps:.1f}fps, {total}帧")
+            self.log(f"并行线程: {self.max_workers}")
+            
+            cfg = self.task.get_config()
+            
+            if self.smart_mode or cfg.get("use_detail_restore"):
+                self.log("🔍 智能分析中...")
+                cap.set(cv2.CAP_PROP_POS_FRAMES, total // 2)
+                ret, sample_frame = cap.read()
+                if ret:
+                    self.sample_metrics = ImageAnalyzer.analyze(sample_frame)
+                    self.log(f"📊 亮度:{self.sample_metrics['brightness']:.0f} "
+                            f"对比:{self.sample_metrics['contrast']:.0f} "
+                            f"清晰:{self.sample_metrics['sharpness']:.0f}")
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            
+            ProfessionalRestorer.clear_frame_buffer()
+            
+            processed = self._process_frames_to_sequence(
+                cap, frames_dir, total, fps, progress_cb, time_cb, start_time, cfg
+            )
+            
+            cap.release()
+            
+            if STOP_FLAG:
+                self.log("⏹ 处理已停止")
+                return processed, time.time() - start_time
+            
+            self.log("📦 正在编码 H.264...")
+            if status_cb:
+                status_cb("正在编码视频...")
+            
+            if AudioHandler.merge_h264(frames_dir, audio_path if has_audio else None, 
+                                       self.task.output_path, fps, w, h):
+                self.log("✅ H.264编码完成")
+            else:
+                self.log("⚠️ FFmpeg编码失败，尝试备用方案...")
+                writer = cv2.VideoWriter(temp_video, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+                
+                frame_files = sorted(glob.glob(os.path.join(frames_dir, 'frame_*.png')))
+                for frame_file in frame_files:
+                    frame = cv2.imread(frame_file)
+                    if frame is not None:
+                        writer.write(frame)
+                writer.release()
+                
+                if has_audio:
+                    AudioHandler.merge(temp_video, audio_path, self.task.output_path)
+                else:
+                    AudioHandler.encode_h264(temp_video, self.task.output_path, fps)
+            
+            elapsed = time.time() - start_time
+            return processed, elapsed
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+    
+    def _process_frames_to_sequence(self, cap, frames_dir, total, fps, progress_cb, time_cb, start_time, cfg):
+        global STOP_FLAG, PAUSE_FLAG
+        
+        processed = 0
+        frame_times = []
+        
+        basic_int = cfg.get("basic_intensity", "medium")
+        adv_int = cfg.get("adv_intensity", "medium")
+        detail_int = cfg.get("detail_intensity", "medium")
+        
+        while not STOP_FLAG:
+            while PAUSE_FLAG and not STOP_FLAG:
+                time.sleep(0.1)
+            
+            if STOP_FLAG:
+                break
+            
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            frame_start = time.time()
+            
+            result = self._process_frame(frame, cfg, basic_int, adv_int, detail_int)
+            
+            frame_path = os.path.join(frames_dir, f'frame_{processed:06d}.png')
+            cv2.imwrite(frame_path, result)
+            
+            processed += 1
+            self.task.current_frame = processed
+            self.task.progress = processed / total * 100
+            
+            frame_time = time.time() - frame_start
+            frame_times.append(frame_time)
+            if len(frame_times) > 30:
+                frame_times.pop(0)
+            
+            current_fps = 1.0 / (sum(frame_times) / len(frame_times)) if frame_times else 0
+            self.task.fps = current_fps
+            
+            elapsed = time.time() - start_time
+            self.task.elapsed_time = elapsed
+            
+            if progress_cb:
+                progress_cb(processed, total, current_fps)
+            if time_cb:
+                time_cb(elapsed)
+        
+        return processed
+    
+    def _process_frame(self, frame, cfg, basic_int, adv_int, detail_int):
+        result = frame.copy()
+        original = frame.copy()
+        
+        result = ProfessionalRestorer.temporal_stabilize(result)
+        
+        if cfg.get("use_detail_restore"):
+            result = self.parallel_processor.process_frame_parallel(
+                result, cfg, detail_int, self.sample_metrics, original
+            )
+        
+        if cfg.get("use_basic"):
+            result = ImageProcessor.apply_basic_parallel(
+                result, cfg, basic_int, self.sample_metrics, self.smart_mode
+            )
+        
+        if cfg.get("use_advanced"):
+            result = ImageProcessor.apply_advanced_parallel(
+                result, cfg, adv_int, self.sample_metrics, self.smart_mode
+            )
+        
+        result = ImageProcessor.apply_filters(result, cfg, basic_int)
+        
+        return result
+
+
+# ==================== 14. 预览窗口 ====================
+class PreviewWindow:
+    def __init__(self, master, orig, proc):
+        self.top = Toplevel(master)
+        self.top.title("效果对比 - 拖动分割线")
+        self.top.geometry("960x660")
+        self.top.configure(bg="#2D3142")
+        self.w, self.h = 920, 580
+        self.orig = cv2.resize(orig, (self.w, self.h))
+        self.proc = cv2.resize(proc, (self.w, self.h))
+        self.split = self.w // 2
+        Label(self.top, text="← 原始 | 处理后 →", font=("微软雅黑", 11), bg="#2D3142", fg="#E8E8E8").pack(pady=5)
+        self.cv = Canvas(self.top, width=self.w, height=self.h, bg="black", cursor="sb_h_double_arrow")
+        self.cv.pack(pady=5)
+        self.cv.bind("<B1-Motion>", self._drag)
+        self.cv.bind("<ButtonPress-1>", self._drag)
+        self._update()
+    
+    def _drag(self, e):
+        self.split = max(0, min(e.x, self.w))
+        self._update()
+    
+    def _update(self):
+        img = self.proc.copy()
+        img[:, :self.split] = self.orig[:, :self.split]
+        cv2.line(img, (self.split, 0), (self.split, self.h), (0, 255, 255), 2)
+        cv2.putText(img, "Original", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+        cv2.putText(img, "Enhanced", (self.w-120, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+        self.tk_img = ImageTk.PhotoImage(Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB)))
+        self.cv.create_image(0, 0, anchor="nw", image=self.tk_img)
+
+# ==================== 15. 新建任务对话框 ====================
+class NewTaskDialog:
+    """新建/编辑任务对话框 - 深色主题版"""
+    
+    # 深色主题配色
+    DARK_BG = "#2D2D2D"           # 主背景色
+    DARK_FRAME_BG = "#3D3D3D"     # 框架背景色
+    DARK_TEXT = "#E0E0E0"         # 主文字颜色
+    DARK_SUBTEXT = "#A0A0A0"      # 次要文字颜色
+    DARK_BORDER = "#505050"       # 边框颜色
+    
+    COLORS = {
+        "detail_deblock": "#FF8C00",
+        "detail_presharpen": "#FFD700",
+        "detail_aa": "#20B2AA",
+        "detail_denoise": "#778899",
+        "detail_face": "#FF69B4",
+        "detail_hair": "#DDA0DD",
+        "detail_final_sharp": "#98FB98",
+        "detail_grain": "#A9A9A9",
+        "opt_bright": "#FFB347",
+        "opt_contrast": "#FF8C69",
+        "opt_sat": "#FF69B4",
+        "opt_temp": "#87CEEB",
+        "opt_highlight": "#DDA0DD",
+        "opt_sharp": "#90EE90",
+        "opt_grain": "#98FB98",
+        "opt_landscape": "#40E0D0",
+        "opt_vintage": "#D2B48C",
+        "opt_cinematic": "#BA55D3",
+        "opt_anime_enhance": "#FF69B4",
+        "opt_auto_wb": "#40E0D0",
+        "opt_auto_levels": "#20B2AA",
+        "opt_denoise": "#778899",
+        "opt_shadow": "#708090",
+        "opt_highlight_rec": "#FFD700",
+        "opt_dehaze": "#A9A9A9",
+    }
+    
+    def __init__(self, master, input_path, existing_task=None):
+        self.master = master
+        self.input_path = input_path
+        self.existing_task = existing_task
+        self.result = None
+        
+        self.dialog = Toplevel(master)
+        self.dialog.title("新建任务" if not existing_task else "编辑任务")
+        self.dialog.geometry("550x650")
+        self.dialog.configure(bg=self.DARK_BG)  # 深色背景
+        self.dialog.resizable(False, False)  # 禁止调整窗口大小
+        self.dialog.transient(master)
+        self.dialog.grab_set()
+        
+        self._init_vars()
+        self._init_ui()
+        
+        if existing_task:
+            self._load_from_task(existing_task)
+        
+        self.dialog.wait_window()
+    
+    def _init_vars(self):
+        self.use_detail = BooleanVar(value=False)
+        self.detail_intensity = StringVar(value="medium")
+        self.detail_opts = {
+            "detail_deblock": BooleanVar(value=True),
+            "detail_presharpen": BooleanVar(value=True),
+            "detail_aa": BooleanVar(value=True),
+            "detail_denoise": BooleanVar(value=True),
+            "detail_face": BooleanVar(value=True),
+            "detail_hair": BooleanVar(value=True),
+            "detail_final_sharp": BooleanVar(value=True),
+            "detail_grain": BooleanVar(value=False),
         }
         
-        logger.info(f"开始处理图片: {path}")
+        self.use_basic = BooleanVar(value=False)
+        self.basic_intensity = StringVar(value="medium")
+        self.basic_opts = {
+            'opt_bright': BooleanVar(value=True),
+            'opt_contrast': BooleanVar(value=True),
+            'opt_sat': BooleanVar(value=True),
+            'opt_temp': BooleanVar(value=True),
+            'opt_highlight': BooleanVar(value=True),
+            'opt_sharp': BooleanVar(value=True),
+            'opt_grain': BooleanVar(value=True),
+        }
+        self.filter_opts = {
+            'opt_landscape': BooleanVar(),
+            'opt_vintage': BooleanVar(),
+            'opt_cinematic': BooleanVar(),
+            'opt_anime_enhance': BooleanVar(),
+        }
         
-        out = Path(ConfigManager.get_output_path("single")) / f"proc_{Path(path).name}"
-        out.parent.mkdir(exist_ok=True)
-        self.current_worker = SingleImageWorker(path, str(out), params)
-        self.current_worker.progress.connect(lambda v, m: [self.single_prog.setValue(v), self.single_prog.setFormat(m)])
-        self.current_worker.error.connect(lambda e: logger.error(e))
-        self.current_worker.finished.connect(lambda d: self.show_result_dialog(d['folder']))
-        self.current_worker.start()
+        self.use_advanced = BooleanVar(value=False)
+        self.adv_intensity = StringVar(value="medium")
+        self.smart_mode = BooleanVar(value=True)
+        self.adv_opts = {
+            'opt_auto_wb': BooleanVar(value=True),
+            'opt_auto_levels': BooleanVar(value=True),
+            'opt_denoise': BooleanVar(value=True),
+            'opt_shadow': BooleanVar(value=True),
+            'opt_highlight_rec': BooleanVar(value=True),
+            'opt_dehaze': BooleanVar(value=False),  # 去雾默认不选，与全选一致
+        }
+    
+    def _create_colored_check(self, parent, text, var, color):
+        """创建彩色复选框 - 深色主题"""
+        cb = Checkbutton(parent, text=text, variable=var,
+                        fg=color, bg=self.DARK_FRAME_BG, 
+                        activebackground=self.DARK_FRAME_BG,
+                        selectcolor=self.DARK_BG, font=("微软雅黑", 9))
+        return cb
+    
+    def _create_section(self, parent, title, use_var, intensity_var, opts_dict, 
+                       items_config, title_color="#333", on_toggle=None,
+                       select_all_exclude=None):
+        """创建配置区块 - 深色主题，带全选按钮
+        
+        Args:
+            select_all_exclude: 全选时排除的选项key列表，如 ["detail_grain"]
+        """
+        frame = LabelFrame(parent, text=title, bg=self.DARK_FRAME_BG, fg=title_color,
+                          font=("微软雅黑", 10, "bold"), padx=10, pady=5)
+        frame.pack(fill='x', padx=10, pady=5)
+        
+        # 顶部行：启用复选框 + 强度选择 + 全选按钮
+        top_row = Frame(frame, bg=self.DARK_FRAME_BG)
+        top_row.pack(fill='x', pady=2)
+        
+        # 左侧：启用复选框
+        Checkbutton(top_row, text="启用", variable=use_var, bg=self.DARK_FRAME_BG,
+                   fg=title_color, font=("微软雅黑", 9, "bold"),
+                   selectcolor=self.DARK_BG, activebackground=self.DARK_FRAME_BG,
+                   command=on_toggle).pack(side='left')
+        
+        # 强度选择
+        Label(top_row, text="强度:", bg=self.DARK_FRAME_BG, fg=self.DARK_SUBTEXT,
+              font=("微软雅黑", 9)).pack(side='left', padx=(15, 5))
+        
+        from tkinter import Radiobutton
+        for text, val in [("轻度", "light"), ("中度", "medium"), ("重度", "heavy")]:
+            Radiobutton(top_row, text=text, variable=intensity_var, value=val,
+                       bg=self.DARK_FRAME_BG, fg=self.DARK_TEXT, 
+                       selectcolor=self.DARK_BG, activebackground=self.DARK_FRAME_BG,
+                       font=("微软雅黑", 9)).pack(side='left', padx=2)
+        
+        # 右侧：全选和取消全选按钮
+        def select_all():
+            for key, var in opts_dict.items():
+                if select_all_exclude and key in select_all_exclude:
+                    continue  # 跳过排除的选项
+                var.set(True)
+        
+        def deselect_all():
+            for key, var in opts_dict.items():
+                var.set(False)
+        
+        Button(top_row, text="取消全选", command=deselect_all, 
+               bg="#666666", fg="white", font=("微软雅黑", 8),
+               relief="flat", padx=8, pady=1).pack(side='right', padx=2)
+        
+        Button(top_row, text="全选", command=select_all, 
+               bg="#4CAF50", fg="white", font=("微软雅黑", 8),
+               relief="flat", padx=8, pady=1).pack(side='right', padx=2)
+        
+        # 选项网格
+        opts_frame = Frame(frame, bg=self.DARK_FRAME_BG)
+        opts_frame.pack(fill='x', pady=5)
+        
+        row = 0
+        col = 0
+        max_cols = 4
+        
+        for text, key, color in items_config:
+            if key in opts_dict:
+                cb = self._create_colored_check(opts_frame, text, opts_dict[key], color)
+                cb.grid(row=row, column=col, sticky='w', padx=2, pady=1)
+                col += 1
+                if col >= max_cols:
+                    col = 0
+                    row += 1
+        
+        return frame
+    
+    def _init_ui(self):
+        """初始化UI - 深色主题"""
+        # 文件信息区域 - 深灰色
+        file_frame = Frame(self.dialog, bg="#505050", relief="flat")
+        file_frame.pack(fill='x', padx=10, pady=10)
+        Label(file_frame, text=f"📁 {os.path.basename(self.input_path)}", 
+              bg="#505050", fg=self.DARK_TEXT, font=("微软雅黑", 10)).pack(pady=8, padx=10)
+        
+        # 滚动区域 - 不显示滚动条
+        canvas = Canvas(self.dialog, bg=self.DARK_BG, highlightthickness=0)
+        scroll_frame = Frame(canvas, bg=self.DARK_BG)
+        
+        scroll_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw", width=540)
+        
+        # 绑定鼠标滚轮事件
+        # 绑定鼠标滚轮事件 - 仅在canvas区域内有效
+        def on_mousewheel(event):
+            try:
+                # 检查canvas是否存在且有效
+                if canvas.winfo_exists():
+                    canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            except:
+                pass
+
+        # 使用局部绑定而非全局绑定
+        canvas.bind("<MouseWheel>", on_mousewheel)
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", on_mousewheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+
+        # 对话框关闭时解除绑定
+        def on_dialog_close():
+            try:
+                canvas.unbind_all("<MouseWheel>")
+            except:
+                pass
+            self.dialog.destroy()
+
+        self.dialog.protocol("WM_DELETE_WINDOW", on_dialog_close)
+        
+        canvas.pack(side=LEFT, fill=BOTH, expand=True, padx=5)
+        
+        # ===== 细节修复区块 =====
+        detail_items = [
+            ("🧱伪影移除", "detail_deblock", self.COLORS["detail_deblock"]),
+            ("⚡预锐化", "detail_presharpen", self.COLORS["detail_presharpen"]),
+            ("🔍抗锯齿", "detail_aa", self.COLORS["detail_aa"]),
+            ("🔇去噪", "detail_denoise", self.COLORS["detail_denoise"]),
+            ("👤人脸", "detail_face", self.COLORS["detail_face"]),
+            ("💇毛发", "detail_hair", self.COLORS["detail_hair"]),
+            ("✨锐化", "detail_final_sharp", self.COLORS["detail_final_sharp"]),
+            ("📷颗粒", "detail_grain", self.COLORS["detail_grain"]),
+        ]
+        # 全选排除"颗粒"
+        self._create_section(scroll_frame, "🔧 细节修复", self.use_detail, 
+                            self.detail_intensity, self.detail_opts, detail_items, 
+                            "#FF8C00", select_all_exclude=["detail_grain"])
+        
+        # ===== 智能后期区块 =====
+        basic_items = [
+            ("✨提亮", "opt_bright", self.COLORS["opt_bright"]),
+            ("📊对比", "opt_contrast", self.COLORS["opt_contrast"]),
+            ("🌈鲜艳", "opt_sat", self.COLORS["opt_sat"]),
+            ("❄️冷白", "opt_temp", self.COLORS["opt_temp"]),
+            ("🔅压光", "opt_highlight", self.COLORS["opt_highlight"]),
+            ("🔪锐化", "opt_sharp", self.COLORS["opt_sharp"]),
+            ("📷质感", "opt_grain", self.COLORS["opt_grain"]),
+        ]
+        # 智能后期全选包括全部
+        self._create_section(scroll_frame, "🎨 智能后期", self.use_basic,
+                            self.basic_intensity, self.basic_opts, basic_items, 
+                            "#FFB347", select_all_exclude=None)
+        
+        # ===== 滤镜效果区块 =====
+        filter_frame = LabelFrame(scroll_frame, text="🎭 滤镜效果", 
+                                 bg=self.DARK_FRAME_BG, fg="#BA55D3",
+                                 font=("微软雅黑", 10, "bold"), padx=10, pady=5)
+        filter_frame.pack(fill='x', padx=10, pady=5)
+        
+        filter_row = Frame(filter_frame, bg=self.DARK_FRAME_BG)
+        filter_row.pack(fill='x')
+        
+        filter_items = [
+            ("🌄风景", "opt_landscape", self.COLORS["opt_landscape"]),
+            ("🎞️老电影", "opt_vintage", self.COLORS["opt_vintage"]),
+            ("🎬电影", "opt_cinematic", self.COLORS["opt_cinematic"]),
+            ("🎌动漫", "opt_anime_enhance", self.COLORS["opt_anime_enhance"]),
+        ]
+        for text, key, color in filter_items:
+            self._create_colored_check(filter_row, text, self.filter_opts[key], color).pack(side='left', padx=5)
+        
+        # ===== 高级后期区块 =====
+        adv_items = [
+            ("🎨白平衡", "opt_auto_wb", self.COLORS["opt_auto_wb"]),
+            ("📈色阶", "opt_auto_levels", self.COLORS["opt_auto_levels"]),
+            ("🔇降噪", "opt_denoise", self.COLORS["opt_denoise"]),
+            ("🌑暗部", "opt_shadow", self.COLORS["opt_shadow"]),
+            ("☀️高光", "opt_highlight_rec", self.COLORS["opt_highlight_rec"]),
+            ("🌫️去雾", "opt_dehaze", self.COLORS["opt_dehaze"]),
+        ]
+        # 全选排除"去雾"
+        adv_frame = self._create_section(scroll_frame, "🔬 高级后期", self.use_advanced,
+                                         self.adv_intensity, self.adv_opts, adv_items, 
+                                         "#7B68EE", select_all_exclude=["opt_dehaze"])
+        
+        # 智能模式复选框
+        smart_row = Frame(adv_frame, bg=self.DARK_FRAME_BG)
+        smart_row.pack(fill='x', pady=2)
+        Checkbutton(smart_row, text="🧠 智能模式 (自动分析画面质量)", variable=self.smart_mode,
+                   bg=self.DARK_FRAME_BG, fg="#50C878", font=("微软雅黑", 9), 
+                   selectcolor=self.DARK_BG, activebackground=self.DARK_FRAME_BG).pack(anchor='w')
+        
+        # ===== 按钮区域 - 高级后期区块下方右对齐 =====
+        btn_frame = Frame(scroll_frame, bg=self.DARK_BG)
+        btn_frame.pack(fill='x', padx=10, pady=(10, 15), anchor='e')
+        
+        # 取消按钮 - 右侧
+        Button(btn_frame, text="取消", command=self._cancel, bg="#9E9E9E", fg="white",
+               font=("微软雅黑", 10), width=12, relief="flat").pack(side='right', padx=(5, 0))
+        
+        # 应用按钮 - 取消按钮左边
+        Button(btn_frame, text="应用", command=self._apply, bg="#4CAF50", fg="white",
+               font=("微软雅黑", 10), width=12, relief="flat").pack(side='right', padx=5)
+    
+    def _load_from_task(self, task):
+        self.use_detail.set(task.use_detail_restore)
+        self.detail_intensity.set(task.detail_intensity)
+        for k, v in task.detail_opts.items():
+            if k in self.detail_opts:
+                self.detail_opts[k].set(v)
+        
+        self.use_basic.set(task.use_basic)
+        self.basic_intensity.set(task.basic_intensity)
+        for k, v in task.basic_opts.items():
+            if k in self.basic_opts:
+                self.basic_opts[k].set(v)
+        for k, v in task.filter_opts.items():
+            if k in self.filter_opts:
+                self.filter_opts[k].set(v)
+        
+        self.use_advanced.set(task.use_advanced)
+        self.adv_intensity.set(task.adv_intensity)
+        self.smart_mode.set(task.smart_mode)
+        for k, v in task.adv_opts.items():
+            if k in self.adv_opts:
+                self.adv_opts[k].set(v)
+    
+    def _apply(self):
+        """应用配置 - 修复文件名重复问题"""
+        base, ext = os.path.splitext(self.input_path)
+        
+        # 生成不重复的输出文件名
+        output_path = f"{base}_Enhanced.mp4"
+        counter = 1
+        while os.path.exists(output_path):
+            output_path = f"{base}_Enhanced_{counter}.mp4"
+            counter += 1
+        
+        task = TaskItem(
+            task_id=str(uuid.uuid4())[:8],
+            input_path=self.input_path,
+            output_path=output_path,
+            use_detail_restore=self.use_detail.get(),
+            detail_intensity=self.detail_intensity.get(),
+            detail_opts={k: v.get() for k, v in self.detail_opts.items()},
+            use_basic=self.use_basic.get(),
+            basic_intensity=self.basic_intensity.get(),
+            basic_opts={k: v.get() for k, v in self.basic_opts.items()},
+            filter_opts={k: v.get() for k, v in self.filter_opts.items()},
+            use_advanced=self.use_advanced.get(),
+            adv_intensity=self.adv_intensity.get(),
+            smart_mode=self.smart_mode.get(),
+            adv_opts={k: v.get() for k, v in self.adv_opts.items()},
+        )
+        
+        self.result = task
+        # ↓↓↓ 新增的4行代码 ↓↓↓
+        # 关闭对话框前，解除全局鼠标滚轮绑定，避免报错
+        try:
+            self.dialog.unbind_all("<MouseWheel>")
+        except:
+            pass
+        # ↑↑↑ 新增的4行代码 ↑↑↑
+        self.dialog.destroy()
+    
+    def _cancel(self):
+        self.result = None
+        # ↓↓↓ 新增的4行代码 ↓↓↓
+        # 关闭对话框前，解除全局鼠标滚轮绑定，避免报错
+        try:
+            self.dialog.unbind_all("<MouseWheel>")
+        except:
+            pass
+        # ↑↑↑ 新增的4行代码 ↑↑↑
+        self.dialog.destroy()
+    
+# ==================== 16. 主界面 (仿Video2X风格) - 修复版 ====================
+class App:
+    """主应用界面 - 仿Video2X风格，修复日志面板和任务列表对齐问题"""
+    
+    # 统一的列宽定义，确保表头和任务行使用相同的值
+    COLUMN_WIDTHS = [0.30, 0.25, 0.25, 0.10, 0.10]
+    COLUMN_NAMES = ["文件名", "处理任务", "进度", "编辑", "删除"]
+
+    # 任务状态对应的背景颜色
+    STATUS_COLORS = {
+        TaskStatus.PENDING: "#FFFFFF",      # 待处理 - 白色
+        TaskStatus.RUNNING: "#E3F2FD",      # 运行中 - 浅蓝色
+        TaskStatus.PAUSED: "#FFE4E8",       # 暂停 - 粉色
+        TaskStatus.STOPPED: "#FFCDD2",      # 停止 - 浅红色
+        TaskStatus.COMPLETED: "#E8F5E9",    # 完成 - 浅绿色
+        TaskStatus.FAILED: "#FFEBEE",       # 失败 - 浅红色
+        "selected": "#FFF8DC",              # 选中 - 黄色
+    }
+    
+    # 进度条颜色
+    PROGRESS_COLORS = {
+        "running": "#2196F3",    # 运行中 - 蓝色
+        "completed": "#4CAF50",  # 完成 - 绿色
+        "paused": "#FF9800",     # 暂停 - 橙色
+        "stopped": "#F44336",    # 停止 - 红色
+    }
+    
+    def __init__(self):
+        try:
+            from tkinterdnd2 import DND_FILES, TkinterDnD
+            self.root = TkinterDnD.Tk()
+            self.dnd_available = True
+        except:
+            from tkinter import Tk
+            self.root = Tk()
+            self.dnd_available = False
+        
+        self.root.title("笔记本高清视频修复 2025 V7.0")
+        self.root.geometry("800x650")
+        self.root.configure(bg="white")
+        
+        # ===== 日志面板尺寸常量（必须在 _init_ui 之前定义）=====
+        self.log_min_width = 180   # 日志面板最小宽度
+        self.log_max_width = 360   # 日志面板最大宽度
+        self.main_min_width = 400  # 主窗口（不含日志）最小宽度
+        self.min_height = 450      # 窗口最小高度
+        
+        self.root.minsize(self.main_min_width, self.min_height)
+        
+        self.activated = False
+        self.gpu = GPUDetector()
+        self.checker = EnvironmentChecker(self._log)
+        self.downloader = RobustDownloader(self._log)
+        self.task_manager = TaskManager()
+        
+        self.is_running = False
+        self.is_paused = False
+        self.current_processing_task = None
+        self.log_visible = False
+        self.selected_task_id = None
+        self._last_width = 800  # 记录上次窗口宽度
+        # 新增：设置变量
+        self.setting_on_complete = StringVar(value="nothing")  # 处理完成后的操作
+        self.setting_auto_show_stats = BooleanVar(value=False)  # 自动显示统计数据
+        self.setting_delete_completed = BooleanVar(value=False)  # 删除已完成任务
+        
+        self._check_key()
+        self._init_ui()
+        self._setup_drop()
+        
+        if not self.activated:
+            self._start_trial()
+        
+        self._update_status("就绪")
+    
+    def _check_key(self):
+        self.mac = LicenseManager.get_machine_code()
+        if LicenseManager.check_license_file():
+            self.activated = True
+        else:
+            self._show_activation()
+    
+    def _show_activation(self):
+        """显示激活窗口 - 居中于主窗口"""
+        win = Toplevel(self.root)
+        win.title("软件激活")
+        win.geometry("400x300")
+        win.config(bg="white")
+        win.transient(self.root)
+        win.grab_set()
+        
+        # 等待主窗口显示完成后再计算居中位置
+        self.root.update_idletasks()
+        
+        # 计算居中位置
+        main_x = self.root.winfo_x()
+        main_y = self.root.winfo_y()
+        main_w = self.root.winfo_width()
+        main_h = self.root.winfo_height()
+        
+        win_w = 400
+        win_h = 300
+        
+        # 计算激活窗口应该出现的位置（主窗口中心）
+        x = main_x + (main_w - win_w) // 2
+        y = main_y + (main_h - win_h) // 2
+        
+        # 确保窗口不会超出屏幕
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        x = max(0, min(x, screen_w - win_w))
+        y = max(0, min(y, screen_h - win_h))
+        
+        win.geometry(f"{win_w}x{win_h}+{x}+{y}")
+        
+        Label(win, text="📋 机器码:", bg="white", fg="#333", font=("微软雅黑", 11)).pack(pady=15)
+        e1 = Entry(win, width=35, font=("Consolas", 12), justify="center", relief="solid", bd=1)
+        e1.pack(ipady=5)
+        e1.insert(0, self.mac)
+        
+        Label(win, text="🔑 激活密钥:", bg="white", fg="#333", font=("微软雅黑", 11)).pack(pady=15)
+        e2 = Entry(win, width=35, font=("Consolas", 12), justify="center", relief="solid", bd=1)
+        e2.pack(ipady=5)
+        
+        def activate():
+            if LicenseManager.verify_key(self.mac, e2.get()):
+                LicenseManager.save_license()
+                self.activated = True
+                messagebox.showinfo("成功", "✅ 激活成功!")
+                win.destroy()
+            else:
+                messagebox.showerror("错误", "❌ 密钥无效")
+        
+        btn_frame = Frame(win, bg="white")
+        btn_frame.pack(pady=20)
+        
+        Button(btn_frame, text="✅ 激活", command=activate, bg="#4CAF50", fg="white",
+            width=15, font=("微软雅黑", 10), relief="flat").pack(side=LEFT, padx=10)
+        Button(btn_frame, text="⏰ 试用15分钟", command=win.destroy, bg="#9E9E9E", fg="white",
+            width=15, font=("微软雅黑", 10), relief="flat").pack(side=LEFT, padx=10)
+        
+        Label(win, text="客服: u788990@163.com", bg="white", fg="#999").pack(pady=20)
+        self.root.wait_window(win)
+    
+    def _start_trial(self):
+        """试用模式 - 15分钟后强制停止任务并退出"""
+        self.trial_mins = 15
+        self.trial_expired = False  # 新增：试用过期标志
+        
+        def tick():
+            # 如果已激活，停止试用倒计时
+            if self.activated:
+                return
+            
+            # 如果已过期，不再处理（防止重复触发）
+            if self.trial_expired:
+                return
+            
+            self.trial_mins -= 1
+            
+            if self.trial_mins <= 0:
+                # 标记试用已过期
+                self.trial_expired = True
+                
+                # 停止所有正在运行的任务
+                global STOP_FLAG
+                STOP_FLAG = True
+                
+                self._log("[warning] 试用时间到，正在停止任务...")
+                
+                # 禁用所有控件，防止继续操作
+                self._disable_all_controls()
+                
+                # 延迟显示退出窗口，给任务一点时间停止
+                self.root.after(500, self._show_trial_expired_dialog)
+            else:
+                # 更新标题显示剩余时间
+                self.root.title(f"笔记本高清视频修复 V7.0 (试用:{self.trial_mins}分)")
+                # 安排下一次tick
+                self.root.after(60000, tick)
+        
+        # 60秒后第一次tick
+        self.root.after(60000, tick)
+
+    def _show_trial_expired_dialog(self):
+        """显示试用过期对话框 - 60秒后强制退出，不可取消"""
+        
+        # 创建模态对话框
+        exit_win = Toplevel(self.root)
+        exit_win.title("试用结束")
+        exit_win.geometry("400x220")
+        exit_win.configure(bg="white")
+        exit_win.transient(self.root)
+        exit_win.grab_set()
+        
+        # 禁止通过X按钮关闭
+        exit_win.protocol("WM_DELETE_WINDOW", lambda: None)
+        
+        # 禁止通过Alt+F4关闭（Windows）
+        exit_win.bind('<Alt-F4>', lambda e: 'break')
+        
+        # 置顶显示
+        try:
+            exit_win.attributes('-topmost', True)
+        except:
+            pass
+        
+        # 居中显示
+        self.root.update_idletasks()
+        main_x = self.root.winfo_x()
+        main_y = self.root.winfo_y()
+        main_w = self.root.winfo_width()
+        main_h = self.root.winfo_height()
+        win_w, win_h = 400, 220
+        x = main_x + (main_w - win_w) // 2
+        y = main_y + (main_h - win_h) // 2
+        x = max(0, min(x, self.root.winfo_screenwidth() - win_w))
+        y = max(0, min(y, self.root.winfo_screenheight() - win_h))
+        exit_win.geometry(f"{win_w}x{win_h}+{x}+{y}")
+        
+        # UI元素
+        Label(exit_win, text="⏰", font=("", 40), bg="white", fg="#FF9800").pack(pady=10)
+        
+        countdown_seconds = 60
+        countdown_var = [countdown_seconds]  # 使用列表以便在闭包中修改
+        
+        msg_label = Label(exit_win, 
+                        text=f"试用时间已到，程序将在 {countdown_var[0]} 秒后自动退出。\n请联系客服获取激活密钥：u788990@163.com",
+                        bg="white", fg="#333", font=("微软雅黑", 10), justify="center")
+        msg_label.pack(pady=10)
+        
+        btn = Button(exit_win, text=f"立即退出 ({countdown_var[0]}s)", 
+                    command=lambda: self._do_force_exit(), 
+                    bg="#F44336", fg="white",
+                    font=("微软雅黑", 10, "bold"), width=18, relief="flat")
+        btn.pack(pady=10)
+        
+        # 保存引用，供 _do_force_exit 使用
+        self._trial_exit_win = exit_win
+        
+        def update_countdown():
+            # 检查窗口是否仍然存在
+            try:
+                if not exit_win.winfo_exists():
+                    # 窗口被意外关闭，立即强制退出
+                    self._do_force_exit()
+                    return
+            except:
+                # 任何异常都强制退出
+                self._do_force_exit()
+                return
+            
+            countdown_var[0] -= 1
+            
+            if countdown_var[0] <= 0:
+                # 倒计时结束，强制退出
+                self._do_force_exit()
+            else:
+                try:
+                    msg_label.config(text=f"试用时间已到，程序将在 {countdown_var[0]} 秒后自动退出。\n请联系客服获取激活密钥：u788990@163.com")
+                    btn.config(text=f"立即退出 ({countdown_var[0]}s)")
+                    exit_win.after(1000, update_countdown)
+                except:
+                    # 更新UI失败，强制退出
+                    self._do_force_exit()
+        
+        # 开始倒计时
+        exit_win.after(1000, update_countdown)
+    
+    def _disable_all_controls(self):
+        """禁用所有控件，防止用户在退出倒计时期间继续操作"""
+        try:
+            # 禁用主要操作按钮
+            if hasattr(self, 'btn_start'):
+                self.btn_start.config(state=DISABLED)
+            if hasattr(self, 'btn_pause'):
+                self.btn_pause.config(state=DISABLED)
+            if hasattr(self, 'btn_stop'):
+                self.btn_stop.config(state=DISABLED)
+            if hasattr(self, 'btn_stats'):
+                self.btn_stats.config(state=DISABLED)
+            if hasattr(self, 'btn_log'):
+                self.btn_log.config(state=DISABLED)
+            
+            # 更新状态栏提示
+            self._update_status("试用时间已到，程序即将退出...")
+            
+            # 更新标题
+            self.root.title("笔记本高清视频修复 V7.0 - 试用已过期")
+        except:
+            pass
+    def _do_force_exit(self):
+        """执行强制退出 - 确保程序一定能退出"""
+        
+        # 第一步：尝试关闭退出对话框
+        try:
+            if hasattr(self, '_trial_exit_win') and self._trial_exit_win.winfo_exists():
+                self._trial_exit_win.destroy()
+        except:
+            pass
+        
+        # 第二步：尝试正常关闭主窗口
+        try:
+            self.root.quit()  # 退出 mainloop
+        except:
+            pass
+        
+        try:
+            self.root.destroy()  # 销毁窗口
+        except:
+            pass
+        
+        # 第三步：使用 os._exit 确保立即退出
+        # 这会终止所有线程，确保程序一定能退出
+        import os
+        os._exit(0)
+               
+
+
+    def _init_ui(self):
+        """初始化UI - 日志面板宽度180-360，智能伸缩"""
+        
+        # ========== 左侧主内容区域 ==========
+        self.left_content = Frame(self.root, bg="white")
+        self.left_content.pack(side='left', fill='both', expand=True)
+        
+        # ========== 状态栏（最底部）==========
+        self.status_bar = Label(self.left_content, text="状态: 就绪", bg="#e0e0e0", fg="#333",
+                            font=("微软雅黑", 9), anchor='w', padx=10, height=1)
+        self.status_bar.pack(fill='x', side='bottom')
+        
+        # ========== 菜单栏区域（最顶部）==========
+        menu_frame = Frame(self.left_content, bg="white", height=50)
+        menu_frame.pack(fill='x', side='top')
+        menu_frame.pack_propagate(False)
+        
+        menu_left = Frame(menu_frame, bg="white")
+        menu_left.pack(side='left', padx=10, anchor='n', pady=5)
+        
+        # 文件菜单
+        btn_file = Button(menu_left, text="文件", bg="white", fg="#333", relief="flat",
+                        font=("微软雅黑", 10), padx=10, command=self._show_file_menu)
+        btn_file.pack(side='left')
+        self.btn_file = btn_file  # 保存引用用于定位菜单
+
+        # 编辑菜单
+        btn_edit = Button(menu_left, text="编辑", bg="white", fg="#333", relief="flat",
+                        font=("微软雅黑", 10), padx=10, command=self._show_settings_window)
+        btn_edit.pack(side='left')
+
+        # 帮助菜单 - 点击弹出子菜单
+        btn_help = Button(menu_left, text="帮助", bg="white", fg="#333", relief="flat",
+                        font=("微软雅黑", 10), padx=10, command=self._show_help_menu)
+        btn_help.pack(side='left')
+        self.btn_help = btn_help  # 保存引用用于定位菜单
+        
+        gpu_info = self.gpu.info
+        if gpu_info["has_discrete"]:
+            gpu_text = f"GPU加速: {self.gpu.get_short_status()}"
+        elif gpu_info["has_integrated"]:
+            gpu_text = f"核显加速: {self.gpu.get_short_status()}"
+        else:
+            gpu_text = f"CPU模式 ({gpu_info['cores']}核心)"
+        
+        gpu_label = Label(menu_frame, text=gpu_text, bg="white", fg="#666", font=("微软雅黑", 9))
+        gpu_label.pack(side='left', padx=50, anchor='n', pady=8)
+        
+        resource_frame = Frame(menu_frame, bg="white")
+        resource_frame.pack(side='right', padx=10, anchor='n', pady=2)
+        
+        resource_row1 = Frame(resource_frame, bg="white")
+        resource_row1.pack()
+        
+        Label(resource_row1, text="资源:", bg="white", fg="#666", 
+            font=("微软雅黑", 9)).pack(side='left')
+        
+        self.resource_var = DoubleVar(value=0.7)
+        self.resource_scale = Scale(resource_row1, from_=0.3, to=1.0, resolution=0.1,
+                                orient=HORIZONTAL, variable=self.resource_var,
+                                bg="white", highlightthickness=0, length=160,
+                                showvalue=False, troughcolor="#ddd")
+        self.resource_scale.pack(side='left', padx=5)
+        
+        self.resource_label = Label(resource_row1, text="70%", bg="white", fg="#4CAF50",
+                                font=("微软雅黑", 9, "bold"))
+        self.resource_label.pack(side='left')
+        
+        resource_tip = Label(resource_frame, text="调整处理占用的系统资源比例", 
+                            bg="white", fg="#999", font=("微软雅黑", 8))
+        resource_tip.pack()
+        
+        def update_resource(*args):
+            self.resource_label.config(text=f"{int(self.resource_var.get()*100)}%")
+        self.resource_var.trace_add("write", update_resource)
+        
+        # ========== 工具栏 ==========
+        toolbar = Frame(self.left_content, bg="white", height=40)
+        toolbar.pack(fill='x', side='top')
+        toolbar.pack_propagate(False)
+        
+        toolbar_inner = Frame(toolbar, bg="white")
+        toolbar_inner.pack(side='left', padx=5, pady=5)
+        
+        btn_style = {"bg": "white", "fg": "#333", "relief": "flat", "font": ("微软雅黑", 10),
+                    "activebackground": "#f0f0f0"}
+        
+        Button(toolbar_inner, text="＋ 添加任务", command=self._add_task, **btn_style).pack(side='left', padx=5)
+        Button(toolbar_inner, text="－ 移除所选任务", command=self._remove_selected, **btn_style).pack(side='left', padx=5)
+        Button(toolbar_inner, text="🗑 清除所有任务", command=self._clear_all, **btn_style).pack(side='left', padx=5)
+        
+        # ========== 灰色分隔条 ==========
+        Frame(self.left_content, bg="#d0d0d0", height=1).pack(fill='x', side='top')
+        
+        # ========== 中间容器（包含任务列表区域 + 底部控制栏 + 日志面板）==========
+        self.middle_container = Frame(self.left_content, bg="white")
+        self.middle_container.pack(fill='both', expand=True, side='top')
+        
+        # ========== 右侧日志面板（放在middle_container内）==========
+        self.log_panel = Frame(self.middle_container, bg="white")
+        self.log_visible = False
+        
+        log_header = Frame(self.log_panel, bg="#e8e8e8", height=35)
+        log_header.pack(fill='x')
+        log_header.pack_propagate(False)
+        
+        Label(log_header, text="日志", bg="#e8e8e8", fg="#333", 
+            font=("微软雅黑", 10, "bold")).pack(side='left', padx=8, pady=5)
+        
+        Button(log_header, text="✕", command=self._toggle_log, bg="#e8e8e8", fg="#666",
+            relief="flat", font=("微软雅黑", 10), width=3).pack(side='right', padx=5)
+        
+        log_level_frame = Frame(self.log_panel, bg="white")
+        log_level_frame.pack(fill='x', padx=5, pady=3)
+        
+        Label(log_level_frame, text="等级", bg="white", fg="#666",
+            font=("微软雅黑", 9)).pack(side='left')
+        
+        self.log_level = StringVar(value="info")
+        from tkinter.ttk import Combobox
+        level_combo = Combobox(log_level_frame, textvariable=self.log_level,
+                            values=["debug", "info", "warning", "error"], width=8)
+        level_combo.pack(side='right')
+        
+        log_text_frame = Frame(self.log_panel, bg="white")
+        log_text_frame.pack(fill='both', expand=True, padx=5, pady=3)
+        
+        self.log_text = Text(log_text_frame, bg="white", fg="#333", font=("Consolas", 9),
+                            wrap='word', relief="solid", bd=1)
+        log_scroll = Scrollbar(log_text_frame, orient=VERTICAL, command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=log_scroll.set)
+        
+        log_scroll.pack(side='right', fill='y')
+        self.log_text.pack(fill='both', expand=True)
+        
+        Button(self.log_panel, text="保存日志", command=self._save_log, bg="white", fg="#333",
+            relief="flat", font=("微软雅黑", 9), bd=1, highlightbackground="#ddd").pack(fill='x', padx=5, pady=5)
+        
+        # ========== 左侧内容区（任务列表+底部控制栏）==========
+        self.left_main = Frame(self.middle_container, bg="white")
+        self.left_main.pack(side='left', fill='both', expand=True)
+        
+        # ========== 底部控制栏 ==========
+        self.bottom_frame = Frame(self.left_main, bg="#f5f5f5", height=140)
+        self.bottom_frame.pack(fill='x', side='bottom')
+        self.bottom_frame.pack_propagate(False)
+
+        # 按钮行（在框外面）
+        btn_row = Frame(self.bottom_frame, bg="#f5f5f5")
+        btn_row.pack(fill='x', pady=(10, 5), padx=10)
+        btn_row.columnconfigure(1, weight=1)
+
+        self.btn_stats = Button(btn_row, text="ⓘ 统计数据", command=self._show_stats, 
+                            bg="white", fg="#333", relief="solid", bd=1, 
+                            font=("微软雅黑", 11, "bold"), width=12)
+        self.btn_stats.grid(row=0, column=0, sticky='w')
+
+        self.btn_frame_center = Frame(btn_row, bg="#f5f5f5")
+        self.btn_frame_center.grid(row=0, column=1, sticky='ew', padx=10)
+
+        self.btn_start = Button(self.btn_frame_center, text="▷ 开始", command=self._start_processing,
+                            bg="white", fg="#333", relief="solid", bd=1,
+                            font=("微软雅黑", 12, "bold"))
+        self.btn_start.pack(fill='x', expand=True)
+
+        self.btn_pause = Button(self.btn_frame_center, text="❚❚ 暂停", command=self._pause_processing,
+                            bg="white", fg="#333", relief="solid", bd=1,
+                            font=("微软雅黑", 12, "bold"))
+
+        self.btn_stop = Button(self.btn_frame_center, text="□ 停止", command=self._stop_processing,
+                            bg="white", fg="#333", relief="solid", bd=1,
+                            font=("微软雅黑", 12, "bold"))
+
+        self.btn_log = Button(btn_row, text="≡ 日志", command=self._toggle_log,
+                            bg="white", fg="#333", relief="solid", bd=1,
+                            font=("微软雅黑", 11, "bold"), width=10)
+        self.btn_log.grid(row=0, column=2, sticky='e')
+
+        # 带边框的统计信息区域（只包含时间和进度条）
+        stats_box = LabelFrame(self.bottom_frame, text="", bg="#f5f5f5", 
+                            relief="groove", bd=2, padx=10, pady=8)
+        stats_box.pack(fill='x', padx=10, pady=(0, 8))
+
+        # 统计信息行
+        stats_row = Frame(stats_box, bg="#f5f5f5")
+        stats_row.pack(fill='x')
+
+        self.stats_left = Frame(stats_row, bg="#f5f5f5")
+        self.stats_left.pack(side='left')
+
+        self.lbl_fps = Label(self.stats_left, text="帧/秒:  -", bg="#f5f5f5", fg="#333",
+                            font=("微软雅黑", 9))
+        self.lbl_fps.pack(anchor='w')
+
+        self.lbl_elapsed = Label(self.stats_left, text="已用时间:  00:00:00", bg="#f5f5f5", fg="#333",
+                                font=("微软雅黑", 9))
+        self.lbl_elapsed.pack(anchor='w')
+
+        self.lbl_remaining = Label(self.stats_left, text="剩余时间:  00:00:00", bg="#f5f5f5", fg="#333",
+                                font=("微软雅黑", 9))
+        self.lbl_remaining.pack(anchor='w')
+
+        # 进度条区域 - 使用Canvas实现
+        progress_frame = Frame(stats_row, bg="#f5f5f5")
+        progress_frame.pack(side='left', fill='x', expand=True, padx=20)
+
+        # Canvas进度条，高度30
+        self.main_progress_canvas = Canvas(progress_frame, bg="#E0E0E0", highlightthickness=1,
+                                        highlightbackground="#CCCCCC", height=30)
+        self.main_progress_canvas.pack(fill='x', pady=5)
+        self.main_progress_canvas.bind('<Configure>', lambda e: self._draw_main_progress())
+
+        # 存储当前进度信息
+        self.main_progress_value = 0
+        self.main_progress_text = "正在处理: 0/0 (0%)"
+        
+        # ========== 主区域（任务列表）==========
+        self.main_area = Frame(self.left_main, bg="white")
+        self.main_area.pack(fill='both', expand=True, side='top')
+        
+        # 任务列表容器 - 使用统一的容器来确保表头和内容宽度一致
+        self.list_container = Frame(self.main_area, bg="white")
+        self.list_container.pack(side='left', fill='both', expand=True)
+        
+        # ========== 表头 - 使用place布局确保列宽固定比例 ==========
+        # 表头外层容器
+        self.header_container = Frame(self.list_container, bg="white", height=35)
+        self.header_container.pack(fill='x', side='top')
+        self.header_container.pack_propagate(False)
+        
+        # 表头内容区（左侧，与数据区域对齐）
+        self.header_frame = Frame(self.header_container, bg="white")
+        self.header_frame.pack(side='left', fill='both', expand=True)
+        
+        # 表头右侧占位符（与滚动条同宽，保持对齐）
+        self.header_scrollbar_placeholder = Frame(self.header_container, bg="white", width=17)
+        self.header_scrollbar_placeholder.pack(side='right', fill='y')
+        self.header_scrollbar_placeholder.pack_propagate(False)
+        
+        # 表头使用place布局，按比例定位
+        x_pos = 0.0
+        for i, name in enumerate(self.COLUMN_NAMES):
+            width = self.COLUMN_WIDTHS[i]
+            header_cell = Frame(self.header_frame, bg="white", highlightbackground="#d0d0d0",
+                            highlightthickness=1)
+            header_cell.place(relx=x_pos, rely=0, relwidth=width, relheight=1.0)
+            Label(header_cell, text=name, bg="white", fg="#333", 
+                font=("微软雅黑", 10, "bold")).pack(expand=True, pady=5)
+            x_pos += width
+        
+        Frame(self.list_container, bg="#d0d0d0", height=1).pack(fill='x', side='top')
+        
+        # ========== 任务列表区域 ==========
+        self.list_frame = Frame(self.list_container, bg="white")
+        self.list_frame.pack(side='top', fill='both', expand=True)
+        
+        self.drop_hint_frame = Frame(self.list_frame, bg="white")
+        
+        self.drop_icon = Canvas(self.drop_hint_frame, width=100, height=90, bg="white", highlightthickness=0)
+        self.drop_icon.create_rectangle(15, 10, 85, 70, outline="#bbb", dash=(5, 3), width=2)
+        self.drop_icon.create_polygon(25, 60, 45, 35, 55, 50, 75, 25, 75, 60, fill="#ccc", outline="#ccc")
+        self.drop_icon.create_oval(30, 20, 42, 32, fill="#ccc", outline="#ccc")
+        
+        self.drop_hint_label = Label(self.drop_hint_frame, text="将文件拖拽到此处以创建新任务",
+                                    bg="white", fg="#888", font=("微软雅黑", 12))
+        
+        self.task_rows_frame = Frame(self.list_frame, bg="white")
+        
+        self.task_canvas = Canvas(self.task_rows_frame, bg="white", highlightthickness=0)
+        self.task_scrollbar = Scrollbar(self.task_rows_frame, orient=VERTICAL, command=self.task_canvas.yview)
+        self.task_inner_frame = Frame(self.task_canvas, bg="white")
+        
+        self.task_canvas.configure(yscrollcommand=self.task_scrollbar.set)
+        
+        self.task_scrollbar.pack(side='right', fill='y')
+        self.task_canvas.pack(side='left', fill='both', expand=True)
+        
+        self.task_canvas_window = self.task_canvas.create_window((0, 0), window=self.task_inner_frame, anchor='nw')
+        
+        def on_frame_configure(event):
+            self.task_canvas.configure(scrollregion=self.task_canvas.bbox("all"))
+        
+        def on_canvas_configure(event):
+            self.task_canvas.itemconfig(self.task_canvas_window, width=event.width)
+        
+        self.task_inner_frame.bind("<Configure>", on_frame_configure)
+        self.task_canvas.bind("<Configure>", on_canvas_configure)
+        
+        self._show_drop_hint()
+        
+        self.task_ui_items = {}
+        
+        # 绑定窗口大小变化事件，用于调整日志面板宽度
+        self.root.bind('<Configure>', self._on_window_resize)
+
+        def on_frame_configure(event):
+            self.task_canvas.configure(scrollregion=self.task_canvas.bbox("all"))
+        
+        def on_canvas_configure(event):
+            self.task_canvas.itemconfig(self.task_canvas_window, width=event.width)
+        
+        self.task_inner_frame.bind("<Configure>", on_frame_configure)
+        self.task_canvas.bind("<Configure>", on_canvas_configure)
+        
+        self._show_drop_hint()
+        
+        self.task_ui_items = {}
+        
+        # 设置窗口默认大小和最小尺寸
+        self.root.minsize(400, 450)  # 最小宽度400（比原来850小450）
+        
+        # 绑定窗口大小变化事件，用于调整日志面板宽度
+        self.root.bind('<Configure>', self._on_window_resize)
+        self._last_width = 1000  # 记录上次窗口宽度
+    
+    def _show_drop_hint(self):
+        """显示拖放提示"""
+        self.task_rows_frame.pack_forget()
+        self.drop_hint_frame.pack(fill='both', expand=True)
+        self.drop_icon.pack(pady=(100, 10))
+        self.drop_hint_label.pack(pady=10)
+    
+    def _hide_drop_hint(self):
+        """隐藏拖放提示"""
+        self.drop_hint_frame.pack_forget()
+        self.task_rows_frame.pack(fill='both', expand=True)
+    
+    def _setup_drop(self):
+        """设置拖放"""
+        if self.dnd_available:
+            try:
+                from tkinterdnd2 import DND_FILES
+                self.root.drop_target_register(DND_FILES)
+                self.root.dnd_bind('<<Drop>>', self._on_drop)
+            except:
+                pass
+    
+    def _on_drop(self, event):
+        """处理拖放"""
+        files = event.data.strip('{}').split('} {')
+        video_exts = ('.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.m4v')
+        
+        for f in files:
+            f = f.strip()
+            if f.lower().endswith(video_exts):
+                self._show_new_task_dialog(f)
+    
+    def _add_task(self):
+        """添加任务"""
+        files = filedialog.askopenfilenames(
+            filetypes=[("视频文件", "*.mp4 *.avi *.mov *.mkv *.wmv *.flv *.webm *.m4v"), ("所有文件", "*.*")]
+        )
+        for f in files:
+            self._show_new_task_dialog(f)
+    
+    def _show_new_task_dialog(self, input_path):
+        """显示新建任务对话框 - 修复选中逻辑"""
+        dialog = NewTaskDialog(self.root, input_path)
+        if dialog.result:
+            # 先取消旧的选中状态
+            old_selected_id = self.selected_task_id
+            if old_selected_id and old_selected_id in self.task_ui_items:
+                old_task = self.task_manager.get_task(old_selected_id)
+                if old_task:
+                    self._update_row_color(old_task, is_selected=False)
+            
+            # 设置新的选中ID（在刷新之前设置）
+            self.selected_task_id = dialog.result.task_id
+            
+            # 添加任务并刷新列表
+            self.task_manager.add_task(dialog.result)
+            self._refresh_task_list()
+            self._log(f"[info] 添加任务: {os.path.basename(input_path)}")
+
+    
+    def _refresh_task_list(self):
+        """刷新任务列表显示 - 修复选中状态"""
+        for widget in self.task_inner_frame.winfo_children():
+            widget.destroy()
+        self.task_ui_items.clear()
+        
+        tasks = self.task_manager.get_all_tasks()
+        
+        if not tasks:
+            self._show_drop_hint()
+            return
+        
+        self._hide_drop_hint()
+        
+        for i, task in enumerate(tasks):
+            self._create_task_row(i + 1, task)
+            # 创建行后立即设置正确的颜色（包括选中状态）
+            is_selected = (self.selected_task_id == task.task_id)
+            self._update_row_color(task, is_selected=is_selected)
+    
+    # ============================================================
+# 进度列显示修复 - 替换 App 类的 _create_task_row 方法
+# ============================================================
+
+    def _create_task_row(self, index, task):
+        """创建任务行 - 使用Canvas实现进度条，文字透明背景自然叠加"""
+        row_height = 40
+        
+        row_frame = Frame(self.task_inner_frame, bg="white", height=row_height)
+        row_frame.pack(fill='x', side='top')
+        row_frame.pack_propagate(False)
+        
+        columns_data = [
+            (f"{index}  {task.get_filename()}", 'center'),
+            (task.get_process_types(), 'center'),
+            (None, 'center'),  # 进度列特殊处理
+            ("✎", 'center'),
+            ("🗑", 'center'),
+        ]
+        
+        cells = []
+        progress_canvas = None
+        x_pos = 0.0
+        
+        for col_idx, (text, anchor) in enumerate(columns_data):
+            width = self.COLUMN_WIDTHS[col_idx]
+            
+            cell = Frame(row_frame, bg="white", highlightbackground="#e0e0e0", highlightthickness=1)
+            cell.place(relx=x_pos, rely=0, relwidth=width, relheight=1.0)
+            
+            if col_idx == 2:  # 进度列 - 使用Canvas
+                # Canvas背景色就是"未完成"区域的颜色
+                progress_canvas = Canvas(cell, bg="#E8E8E8", highlightthickness=0)
+                progress_canvas.place(relx=0, rely=0, relwidth=1.0, relheight=1.0)
+                progress_canvas.bind('<Button-1>', lambda e, t=task: self._select_task(t))
+                progress_canvas.bind('<Configure>', lambda e, t=task: self._draw_progress(t))
+                
+            elif col_idx == 3:  # 编辑按钮
+                btn = Button(cell, text=text, bg="white", fg="#666", relief="flat",
+                            font=("微软雅黑", 12), cursor="hand2",
+                            command=lambda t=task: self._edit_task(t))
+                btn.place(relx=0.5, rely=0.5, anchor='center')
+            elif col_idx == 4:  # 删除按钮
+                btn = Button(cell, text=text, bg="white", fg="#666", relief="flat",
+                            font=("微软雅黑", 12), cursor="hand2",
+                            command=lambda t=task: self._delete_task(t))
+                btn.place(relx=0.5, rely=0.5, anchor='center')
+            else:
+                lbl = Label(cell, text=text, bg="white", fg="#333", font=("微软雅黑", 9),
+                        anchor='center')
+                lbl.place(relx=0, rely=0, relwidth=1.0, relheight=1.0)
+                lbl.bind('<Button-1>', lambda e, t=task: self._select_task(t))
+                cell.bind('<Button-1>', lambda e, t=task: self._select_task(t))
+            
+            cells.append(cell)
+            x_pos += width
+        
+        sep = Frame(self.task_inner_frame, bg="#e0e0e0", height=1)
+        sep.pack(fill='x', side='top')
+        
+        # 只保存 progress_canvas，不再需要 progress_bar 和 progress_label
+        self.task_ui_items[task.task_id] = {
+            'row_frame': row_frame,
+            'cells': cells,
+            'separator': sep,
+            'progress_canvas': progress_canvas,
+        }
+        
+        self._update_row_color(task)
+        
+        if progress_canvas:
+            self.root.after(10, lambda: self._draw_progress(task))
+
+    def _draw_progress(self, task):
+        """绘制进度条和文字 - 文字使用create_text，天然透明背景"""
+        if task.task_id not in self.task_ui_items:
+            return
+        
+        ui = self.task_ui_items[task.task_id]
+        canvas = ui.get('progress_canvas')
+        if not canvas:
+            return
+        
+        # 清除之前的绘制内容
+        canvas.delete("all")
+        
+        width = canvas.winfo_width()
+        height = canvas.winfo_height()
+        
+        if width <= 1 or height <= 1:
+            return
+        
+        # 计算进度比例和宽度
+        progress_ratio = task.progress / 100.0 if task.progress > 0 else 0
+        progress_ratio = max(0, min(progress_ratio, 1.0))
+        progress_width = int(width * progress_ratio)
+        
+        # 根据任务状态确定进度条颜色
+        if task.status == TaskStatus.COMPLETED or task.progress >= 100:
+            bar_color = self.PROGRESS_COLORS["completed"]
+        elif task.status == TaskStatus.PAUSED:
+            bar_color = self.PROGRESS_COLORS["paused"]
+        elif task.status == TaskStatus.STOPPED:
+            bar_color = self.PROGRESS_COLORS["stopped"]
+        else:
+            bar_color = self.PROGRESS_COLORS["running"]
+        
+        # 第一层：绘制进度条矩形（Canvas背景#E8E8E8是未完成区域）
+        if progress_width > 0:
+            canvas.create_rectangle(0, 0, progress_width, height, fill=bar_color, outline="")
+        
+        # 第二层：绘制文字（create_text没有背景，自然透明叠加）
+        text = task.get_progress_text()
+        text_x = width // 2
+        text_y = height // 2
+        
+        # 文字颜色：当进度条覆盖文字中心时切换为白色
+        text_color = "white" if progress_width > text_x else "#333333"
+        
+        canvas.create_text(text_x, text_y, text=text, fill=text_color,
+                        font=("微软雅黑", 11, "bold"))
+
+    def _draw_main_progress(self):
+        """绘制底部主进度条 - 文字透明背景叠加在进度条上"""
+        canvas = self.main_progress_canvas
+        canvas.delete("all")
+        
+        width = canvas.winfo_width()
+        height = canvas.winfo_height()
+        
+        if width <= 1 or height <= 1:
+            return
+        
+        # 计算进度宽度
+        progress_ratio = self.main_progress_value / 100.0
+        progress_ratio = max(0, min(progress_ratio, 1.0))
+        progress_width = int(width * progress_ratio)
+        
+        # 绘制进度条（蓝色）
+        if progress_width > 0:
+            canvas.create_rectangle(0, 0, progress_width, height, fill="#2196F3", outline="")
+        
+        # 绘制文字（透明背景）
+        text_x = width // 2
+        text_y = height // 2
+        
+        # 文字颜色：进度条覆盖文字中心时切换为白色
+        text_color = "white" if progress_width > text_x else "#333333"
+        
+        canvas.create_text(text_x, text_y, text=self.main_progress_text, fill=text_color,
+                        font=("微软雅黑", 10, "bold"))
+
+    def _select_task(self, task):
+        """选择任务"""
+        old_id = self.selected_task_id
+        self.selected_task_id = task.task_id
+        
+        # 更新旧选中行的颜色
+        if old_id and old_id in self.task_ui_items:
+            old_task = self.task_manager.get_task(old_id)
+            if old_task:
+                self._update_row_color(old_task, is_selected=False)
+        
+        # 更新新选中行的颜色
+        self._update_row_color(task, is_selected=True)
+    
+    def _highlight_row(self, task_id, highlight=True):
+        """高亮或取消高亮任务行（仅用于选中状态）"""
+        task = self.task_manager.get_task(task_id)
+        if task:
+            self._update_row_color(task, is_selected=highlight)
+    
+    # ============================================================
+    # 同时需要替换 App 类的 _update_row_color 方法（增强版）
+    # ============================================================
+
+    def _update_row_color(self, task, is_selected=None):
+        """根据任务状态更新行颜色"""
+        if task.task_id not in self.task_ui_items:
+            return
+        
+        ui = self.task_ui_items[task.task_id]
+        
+        if is_selected is None:
+            is_selected = (self.selected_task_id == task.task_id)
+        
+        # 确定背景色
+        if task.status == TaskStatus.RUNNING:
+            bg_color = self.STATUS_COLORS[TaskStatus.RUNNING]
+        elif is_selected:
+            bg_color = self.STATUS_COLORS["selected"]
+        elif task.status == TaskStatus.PAUSED:
+            bg_color = self.STATUS_COLORS[TaskStatus.PAUSED]
+        elif task.status == TaskStatus.STOPPED:
+            bg_color = self.STATUS_COLORS[TaskStatus.STOPPED]
+        elif task.status == TaskStatus.COMPLETED:
+            bg_color = self.STATUS_COLORS[TaskStatus.COMPLETED]
+        elif task.status == TaskStatus.FAILED:
+            bg_color = self.STATUS_COLORS[TaskStatus.FAILED]
+        else:
+            bg_color = self.STATUS_COLORS[TaskStatus.PENDING]
+        
+        ui['row_frame'].config(bg=bg_color)
+        
+        for idx, cell in enumerate(ui['cells']):
+            if idx == 2:  # 进度列是Canvas，不改变背景
+                continue
+            cell.config(bg=bg_color)
+            for child in cell.winfo_children():
+                if isinstance(child, (Label, Frame)):
+                    try:
+                        child.config(bg=bg_color)
+                    except:
+                        pass
+        
+        # 重绘进度条
+        self._draw_progress(task)
+        
+        # 更新进度条颜色
+        progress_bar = ui.get('progress_bar')
+        progress_label = ui.get('progress_label')
+        
+        if progress_bar:
+            if task.status == TaskStatus.COMPLETED or task.progress >= 100:
+                bar_color = self.PROGRESS_COLORS["completed"]
+            elif task.status == TaskStatus.PAUSED:
+                bar_color = self.PROGRESS_COLORS["paused"]
+            elif task.status == TaskStatus.STOPPED:
+                bar_color = self.PROGRESS_COLORS["stopped"]
+            else:
+                bar_color = self.PROGRESS_COLORS["running"]
+            
+            progress_bar.config(bg=bar_color)
+            
+            # 更新进度条文本的背景色（根据进度位置）
+            if progress_label:
+                progress_ratio = task.progress / 100.0 if task.progress > 0 else 0
+                if progress_ratio > 0.5:
+                    progress_label.config(bg=bar_color, fg="white")
+                else:
+                    progress_label.config(bg="#E8E8E8", fg="#333333")
+    
+    def _edit_task(self, task):
+        """编辑任务"""
+        if task.status == TaskStatus.RUNNING:
+            messagebox.showwarning("提示", "任务正在运行，无法编辑")
+            return
+        
+        dialog = NewTaskDialog(self.root, task.input_path, existing_task=task)
+        if dialog.result:
+            for key, value in dialog.result.__dict__.items():
+                if hasattr(task, key) and key != 'task_id':
+                    setattr(task, key, value)
+            self._refresh_task_list()
+    
+    def _delete_task(self, task):
+        """删除任务"""
+        if task.status == TaskStatus.RUNNING:
+            messagebox.showwarning("提示", "任务正在运行，无法删除")
+            return
+        
+        self.task_manager.remove_task(task.task_id)
+        if self.selected_task_id == task.task_id:
+            self.selected_task_id = None
+        self._refresh_task_list()
+    
+    def _remove_selected(self):
+        """移除选中的任务"""
+        if self.selected_task_id:
+            task = self.task_manager.get_task(self.selected_task_id)
+            if task:
+                self._delete_task(task)
+        else:
+            messagebox.showinfo("提示", "请先选择一个任务")
+    
+    def _clear_all(self):
+        """清除所有任务"""
+        if self.is_running:
+            messagebox.showwarning("提示", "有任务正在运行")
+            return
+        self.task_manager.clear_all()
+        self.selected_task_id = None
+        self._refresh_task_list()
+    
+    def _toggle_log(self):
+        """切换日志面板 - 智能扩展窗口宽度"""
+        if self.log_visible:
+            # ===== 收起日志面板 =====
+            self.log_panel.pack_forget()
+            self.log_visible = False
+            # 恢复主窗口最小宽度为不含日志的宽度
+            self.root.minsize(self.main_min_width, self.min_height)
+        else:
+            # ===== 展开日志面板 =====
+            current_width = self.root.winfo_width()
+            current_height = self.root.winfo_height()
+            
+            # 计算含日志面板时的最小窗口宽度
+            min_with_log = self.main_min_width + self.log_min_width  # 400 + 180 = 580
+            
+            # 计算需要扩展的宽度
+            if current_width < min_with_log:
+                # 需要扩展窗口
+                new_width = min_with_log
+                self.root.geometry(f"{new_width}x{current_height}")
+                # 等待窗口更新后再计算日志面板宽度
+                self.root.update_idletasks()
+                current_width = new_width
+            
+            # 设置主窗口最小宽度（含日志面板时）
+            self.root.minsize(min_with_log, self.min_height)
+            
+            # 计算日志面板宽度
+            available_for_log = current_width - self.main_min_width
+            
+            # 日志面板宽度在 log_min_width 和 log_max_width 之间
+            log_width = max(self.log_min_width, min(self.log_max_width, available_for_log))
+            
+            self.log_panel.config(width=log_width)
+            self.log_panel.pack_propagate(False)
+            self.log_panel.pack(side='right', fill='y', before=self.left_main)
+            self.log_visible = True    
+    
+    def _on_window_resize(self, event):
+        """窗口大小变化时调整日志面板宽度"""
+        # 只处理根窗口的Configure事件
+        if event.widget != self.root:
+            return
+        
+        # 避免频繁更新
+        current_width = event.width
+        if abs(current_width - self._last_width) < 5:
+            return
+        self._last_width = current_width
+        
+        # 如果日志面板可见，根据窗口宽度调整日志面板宽度
+        if self.log_visible:
+            available_for_log = current_width - self.main_min_width
+            
+            if available_for_log >= self.log_max_width:
+                log_width = self.log_max_width
+            elif available_for_log >= self.log_min_width:
+                log_width = available_for_log
+            else:
+                log_width = self.log_min_width
+            
+            self.log_panel.config(width=log_width)   
+    
+    def _log(self, msg):
+        """添加日志"""
+        timestamp = time.strftime("%H:%M:%S")
+        self.log_text.insert(END, f"[{timestamp}] {msg}\n")
+        self.log_text.see(END)
+        self.root.update_idletasks()
+    
+    def _save_log(self):
+        """保存日志"""
+        path = filedialog.asksaveasfilename(defaultextension=".txt",
+                                           filetypes=[("文本文件", "*.txt")])
+        if path:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(self.log_text.get(1.0, END))
+    
+    def _update_status(self, text):
+        """更新状态栏"""
+        self.status_bar.config(text=f"状态: {text}")
+    
+    def _show_stats(self):
+        """显示统计数据"""
+        total = self.task_manager.get_task_count()
+        completed = self.task_manager.get_completed_count()
+        messagebox.showinfo("统计数据", f"总任务: {total}\n已完成: {completed}")
+    
+    def _start_processing(self):
+        """开始处理"""
+        global STOP_FLAG, PAUSE_FLAG
+        
+        if self.is_running:
+            return
+        
+        # 检查FFmpeg是否可用
+        if not PM.is_exe_available("ffmpeg"):
+            result = messagebox.askyesno(
+                "缺少FFmpeg", 
+                "检测到FFmpeg未安装，无法处理视频。\n\n是否打开帮助窗口下载安装FFmpeg？"
+            )
+            if result:
+                self._show_activation_window()
+            return
+        
+        task = self.task_manager.get_next_task()
+        if not task:
+            messagebox.showinfo("提示", "没有待处理的任务")
+            return
+        
+        STOP_FLAG = False
+        PAUSE_FLAG = False
+        self.is_running = True
+        self.is_paused = False
+        
+        self.btn_start.pack_forget()
+        self.btn_pause.pack(side='left', fill='x', expand=True, padx=(0, 5))
+        self.btn_stop.pack(side='left', fill='x', expand=True, padx=(5, 0))
+        
+        # 根据设置自动显示统计数据
+        if self.setting_auto_show_stats.get():
+            self._show_stats()
+        
+        threading.Thread(target=self._process_tasks, daemon=True).start()
+    
+    def _pause_processing(self):
+        """暂停/继续处理"""
+        global PAUSE_FLAG
+        
+        if self.is_paused:
+            PAUSE_FLAG = False
+            self.is_paused = False
+            self.btn_pause.config(text="❚❚ 暂停")
+            if self.current_processing_task:
+                self.current_processing_task.status = TaskStatus.RUNNING
+        else:
+            PAUSE_FLAG = True
+            self.is_paused = True
+            self.btn_pause.config(text="▷ 继续")
+            if self.current_processing_task:
+                self.current_processing_task.status = TaskStatus.PAUSED
+        
+        self._refresh_task_list()
+    
+    def _stop_processing(self):
+        """停止处理"""
+        global STOP_FLAG
+        STOP_FLAG = True
+        
+        if self.current_processing_task:
+            self.current_processing_task.status = TaskStatus.STOPPED
+        
+        self._finish_processing()
+    
+    def _finish_processing(self):
+        """完成处理"""
+        self.is_running = False
+        self.is_paused = False
+        self.current_processing_task = None
+        
+        self.btn_pause.pack_forget()
+        self.btn_stop.pack_forget()
+        self.btn_start.pack(fill='x', expand=True)
+        
+        self._refresh_task_list()
+    
+    def _process_tasks(self):
+        """处理所有任务"""
+        global STOP_FLAG
+        
+        while not STOP_FLAG:
+            task = self.task_manager.get_next_task()
+            if not task:
+                break
+            
+            self.current_processing_task = task
+            task.status = TaskStatus.RUNNING
+            task.start_time = time.time()
+            
+            self._update_status(f"正在处理文件 {task.input_path}")
+            self._log(f"[info] 开始处理: {task.get_filename()}")
+            
+            self.root.after(0, self._refresh_task_list)
+            
+            try:
+                pipeline = VideoPipeline(task, self._log, self.gpu.info, self.resource_var.get())
+                
+                def progress_cb(current, total, fps):
+                    task.current_frame = current
+                    task.total_frames = total
+                    task.progress = current / total * 100 if total > 0 else 0
+                    task.fps = fps
+                    self.root.after(0, lambda: self._update_task_ui(task))
+                
+                def time_cb(elapsed):
+                    task.elapsed_time = elapsed
+                    self.root.after(0, lambda: self._update_time_display(task))
+                
+                frames, elapsed = pipeline.run(progress_cb, time_cb, 
+                                              lambda s: self._update_status(s))
+                
+                if not STOP_FLAG:
+                    task.status = TaskStatus.COMPLETED
+                    task.progress = 100
+                    self._log(f"[info] 完成: {task.get_filename()}, 用时 {self._format_time(elapsed)}")
+                    
+            except Exception as e:
+                task.status = TaskStatus.FAILED
+                self._log(f"[error] 处理失败: {e}")
+            
+            self.root.after(0, self._refresh_task_list)
+        
+        self.root.after(0, self._on_all_complete)
+    
+    # ============================================================
+# 同时需要替换 App 类的 _update_task_ui 方法
+# ============================================================
+
+    def _update_task_ui(self, task):
+        """更新任务UI - 任务行进度和底部主进度"""
+        if task.task_id in self.task_ui_items:
+            self._draw_progress(task)
+            self._update_row_color(task)
+        
+        # 更新底部主进度条
+        total = self.task_manager.get_task_count()
+        completed = self.task_manager.get_completed_count()
+        
+        if total > 1:
+            # 多任务模式：显示整体进度
+            overall = completed / total * 100
+            self.main_progress_value = overall
+            self.main_progress_text = f"正在处理: {completed}/{total} ({overall:.0f}%)"
+        else:
+            # 单任务模式：显示当前任务帧进度
+            self.main_progress_value = task.progress
+            self.main_progress_text = f"正在处理: {task.current_frame}/{task.total_frames} ({task.progress:.0f}%)"
+        
+        # 重绘底部进度条
+        self._draw_main_progress()
+        
+        self.lbl_fps.config(text=f"帧/秒:  {task.fps:.2f}")
+    
+    def _update_time_display(self, task):
+        """更新时间显示"""
+        elapsed = task.elapsed_time
+        self.lbl_elapsed.config(text=f"已用时间:  {self._format_time(elapsed)}")
+        
+        if task.fps > 0 and task.total_frames > 0:
+            remaining_frames = task.total_frames - task.current_frame
+            remaining_time = remaining_frames / task.fps
+            self.lbl_remaining.config(text=f"剩余时间:  {self._format_time(remaining_time)}")
+    
+    def _format_time(self, seconds):
+        """格式化时间"""
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    
+    def _on_all_complete(self):
+        """所有任务完成"""
+        self._finish_processing()
+        
+        # 重置底部进度条显示
+        self.main_progress_value = 100
+        self.main_progress_text = "处理完成"
+        self._draw_main_progress()
+        
+        # 根据设置删除已完成任务
+        if self.setting_delete_completed.get():
+            completed_tasks = [t for t in list(self.task_manager.tasks.values()) 
+                            if t.status == TaskStatus.COMPLETED]
+            for task in completed_tasks:
+                self.task_manager.remove_task(task.task_id)
+            self._refresh_task_list()
+            self._log(f"[info] 已删除 {len(completed_tasks)} 个已完成的任务")
+        
+        # 显示完成对话框
+        win = Toplevel(self.root)
+        win.title("处理已完成")
+        win.geometry("350x180")
+        win.configure(bg="white")
+        win.transient(self.root)
+        
+        Label(win, text="ⓘ", font=("", 40), bg="white", fg="#2196F3").pack(pady=10)
+        Label(win, text="所有视频均已成功处理完成。", bg="white", fg="#333",
+            font=("微软雅黑", 11)).pack()
+        
+        btn_frame = Frame(win, bg="white")
+        btn_frame.pack(pady=20)
+        
+        def open_location():
+            completed_tasks = [t for t in self.task_manager.tasks.values() 
+                            if t.status == TaskStatus.COMPLETED]
+            if completed_tasks:
+                folder = os.path.dirname(completed_tasks[0].output_path)
+                if sys.platform == 'win32':
+                    os.startfile(folder)
+                elif sys.platform == 'darwin':
+                    subprocess.run(['open', folder])
+                else:
+                    subprocess.run(['xdg-open', folder])
+            win.destroy()
+        
+        Button(btn_frame, text="文件位置", command=open_location, bg="#2196F3", fg="white",
+            font=("微软雅黑", 10), width=10, relief="flat").pack(side='left', padx=10)
+        Button(btn_frame, text="OK", command=win.destroy, bg="#4CAF50", fg="white",
+            font=("微软雅黑", 10), width=10, relief="flat").pack(side='left', padx=10)
+        
+        # 根据设置执行完成后操作
+        action = self.setting_on_complete.get()
+        if action != "nothing":
+            win.after(2000, lambda: self._execute_complete_action(action))
+
+    def _execute_complete_action(self, action):
+        """执行处理完成后的操作"""
+        if action == "nothing":
+            return
+        
+        action_names = {
+            "shutdown": "关机",
+            "sleep": "睡眠", 
+            "hibernate": "休眠"
+        }
+        
+        # 倒计时确认
+        confirm_win = Toplevel(self.root)
+        confirm_win.title("即将执行操作")
+        confirm_win.geometry("350x180")
+        confirm_win.configure(bg="white")
+        confirm_win.transient(self.root)
+        confirm_win.grab_set()
+        
+        countdown = [30]  # 使用列表以便在闭包中修改
+        
+        Label(confirm_win, text="⚠️", font=("", 40), bg="white", fg="#FF9800").pack(pady=10)
+        
+        msg_label = Label(confirm_win, text=f"计算机将在 {countdown[0]} 秒后{action_names.get(action, action)}",
+                        bg="white", fg="#333", font=("微软雅黑", 11))
+        msg_label.pack()
+        
+        btn_frame = Frame(confirm_win, bg="white")
+        btn_frame.pack(pady=15)
+        
+        cancelled = [False]
+        
+        def cancel():
+            cancelled[0] = True
+            confirm_win.destroy()
+            self._log(f"[info] 用户取消了{action_names.get(action, action)}操作")
+        
+        def do_action():
+            confirm_win.destroy()
+            self._log(f"[info] 正在执行: {action_names.get(action, action)}")
+            
+            try:
+                if sys.platform == 'win32':
+                    if action == "shutdown":
+                        subprocess.run(['shutdown', '/s', '/t', '5'], shell=True)
+                    elif action == "sleep":
+                        # Windows睡眠命令
+                        subprocess.run(['rundll32.exe', 'powrprof.dll,SetSuspendState', '0', '1', '0'], shell=True)
+                    elif action == "hibernate":
+                        subprocess.run(['shutdown', '/h'], shell=True)
+                elif sys.platform == 'darwin':  # macOS
+                    if action == "shutdown":
+                        subprocess.run(['sudo', 'shutdown', '-h', 'now'])
+                    elif action == "sleep":
+                        subprocess.run(['pmset', 'sleepnow'])
+                else:  # Linux
+                    if action == "shutdown":
+                        subprocess.run(['systemctl', 'poweroff'])
+                    elif action == "sleep":
+                        subprocess.run(['systemctl', 'suspend'])
+                    elif action == "hibernate":
+                        subprocess.run(['systemctl', 'hibernate'])
+            except Exception as e:
+                messagebox.showerror("执行失败", f"无法执行{action_names.get(action, action)}操作:\n{e}")
+        
+        Button(btn_frame, text="取消", command=cancel, bg="#F44336", fg="white",
+            font=("微软雅黑", 10, "bold"), width=12, relief="flat").pack(side='left', padx=10)
+        
+        Button(btn_frame, text="立即执行", command=do_action, bg="#FF9800", fg="white",
+            font=("微软雅黑", 10), width=12, relief="flat").pack(side='left', padx=10)
+        
+        def update_countdown():
+            if cancelled[0] or not confirm_win.winfo_exists():
+                return
+            countdown[0] -= 1
+            if countdown[0] <= 0:
+                do_action()
+            else:
+                msg_label.config(text=f"计算机将在 {countdown[0]} 秒后{action_names.get(action, action)}")
+                confirm_win.after(1000, update_countdown)
+        
+        confirm_win.after(1000, update_countdown)
+    
+    def _show_file_menu(self):
+        """显示文件菜单"""
+        # 创建弹出菜单
+        menu = Toplevel(self.root)
+        menu.overrideredirect(True)  # 无边框窗口
+        menu.configure(bg="white", relief="solid", bd=1)
+        
+        # 获取按钮位置
+        x = self.btn_file.winfo_rootx()
+        y = self.btn_file.winfo_rooty() + self.btn_file.winfo_height()
+        menu.geometry(f"+{x}+{y}")
+        
+        # 菜单项样式
+        menu_style = {"bg": "white", "fg": "#333", "relief": "flat", 
+                    "font": ("微软雅黑", 10), "anchor": "w", "padx": 20, "pady": 8,
+                    "activebackground": "#e3f2fd", "activeforeground": "#1976d2"}
+        
+        # 退出按钮
+        btn_exit = Button(menu, text="🚪 退出", width=15,
+                        command=lambda: [menu.destroy(), self._exit_app()], **menu_style)
+        btn_exit.pack(fill='x')
+        
+        # 点击其他地方关闭菜单
+        def close_menu(event):
+            try:
+                if menu.winfo_exists():
+                    widget_str = str(event.widget)
+                    menu_str = str(menu)
+                    if not widget_str.startswith(menu_str):
+                        menu.destroy()
+            except:
+                pass
+        
+        self.root.bind('<Button-1>', close_menu, add='+')
+        menu.bind('<Leave>', lambda e: self.root.after(300, lambda: menu.destroy() if menu.winfo_exists() else None))
+    
+
+    def _exit_app(self):
+        """退出程序"""
+        if self.is_running:
+            # 有任务在运行，询问是否强制退出
+            result = messagebox.askyesnocancel(
+                "确认退出",
+                "当前有任务正在处理中。\n\n"
+                "• 点击【是】: 停止任务并退出\n"
+                "• 点击【否】: 取消退出，继续处理\n"
+                "• 点击【取消】: 取消退出"
+            )
+            
+            if result is True:  # 点击"是"
+                global STOP_FLAG
+                STOP_FLAG = True
+                self._log("[info] 用户请求退出，正在停止任务...")
+                
+                # 等待任务停止后退出
+                def wait_and_exit():
+                    if self.is_running:
+                        self.root.after(100, wait_and_exit)
+                    else:
+                        self.root.destroy()
+                
+                self.root.after(100, wait_and_exit)
+            # 点击"否"或"取消"则不做任何操作
+        else:
+            # 没有任务在运行，直接确认退出
+            if messagebox.askyesno("确认退出", "确定要退出程序吗？"):
+                self.root.destroy()
+
+    def _show_settings_window(self):
+        """显示设置窗口"""
+        win = Toplevel(self.root)
+        win.title("设置")
+        win.geometry("450x500")
+        win.configure(bg="white")
+        win.transient(self.root)
+        win.grab_set()
+        win.resizable(False, False)
+        
+        # 标题
+        Label(win, text="⚙️ 程序设置", bg="white", fg="#333",
+            font=("微软雅黑", 14, "bold")).pack(pady=15)
+        
+        # ===== 其他选项（放在上面）=====
+        other_frame = LabelFrame(win, text="其他选项", bg="white", fg="#333",
+                                font=("微软雅黑", 10, "bold"), padx=15, pady=10)
+        other_frame.pack(fill='x', padx=20, pady=10)
+        
+        # 自动显示统计数据
+        Checkbutton(other_frame, text="📊 当处理开始时自动显示统计数据",
+                    variable=self.setting_auto_show_stats, bg="white", fg="#333",
+                    font=("微软雅黑", 10), selectcolor="white",
+                    activebackground="white").pack(anchor='w', pady=5)
+        
+        # 删除已完成任务
+        Checkbutton(other_frame, text="🗑️ 处理完成后删除已完成的任务",
+                    variable=self.setting_delete_completed, bg="white", fg="#333",
+                    font=("微软雅黑", 10), selectcolor="white",
+                    activebackground="white").pack(anchor='w', pady=5)
+        
+        # ===== 处理完成后操作（放在下面）=====
+        complete_frame = LabelFrame(win, text="处理完成后", bg="white", fg="#333",
+                                    font=("微软雅黑", 10, "bold"), padx=15, pady=10)
+        complete_frame.pack(fill='x', padx=20, pady=10)
+        
+        # 下拉选择
+        options_frame = Frame(complete_frame, bg="white")
+        options_frame.pack(fill='x', pady=5)
+        
+        Label(options_frame, text="执行操作:", bg="white", fg="#333",
+            font=("微软雅黑", 10)).pack(side='left')
+        
+        # 带序号的选项
+        display_options = [
+            "1. 什么都不做",
+            "2. 关机",
+            "3. 睡眠",
+            "4. 休眠"
+        ]
+        
+        # 映射关系
+        display_to_value = {
+            "1. 什么都不做": "nothing",
+            "2. 关机": "shutdown",
+            "3. 睡眠": "sleep",
+            "4. 休眠": "hibernate"
+        }
+        
+        value_to_display = {v: k for k, v in display_to_value.items()}
+        
+        # 显示用的变量
+        self.complete_display_var = StringVar(value=value_to_display.get(self.setting_on_complete.get(), "1. 什么都不做"))
+        
+        from tkinter.ttk import Combobox
+        complete_combo = Combobox(options_frame, textvariable=self.complete_display_var,
+                                values=display_options, state="readonly", width=18)
+        complete_combo.pack(side='left', padx=10)
+        
+        # 当选择改变时更新实际值
+        def on_combo_change(*args):
+            display_val = self.complete_display_var.get()
+            actual_val = display_to_value.get(display_val, "nothing")
+            self.setting_on_complete.set(actual_val)
+        
+        self.complete_display_var.trace_add("write", on_combo_change)
+        
+        # 选项说明
+        desc_frame = Frame(complete_frame, bg="white")
+        desc_frame.pack(fill='x', pady=(10, 5))
+        
+        descriptions = [
+            ("1. 什么都不做", "处理完成后程序保持运行"),
+            ("2. 关机", "处理完成后自动关闭计算机"),
+            ("3. 睡眠", "处理完成后计算机进入睡眠模式"),
+            ("4. 休眠", "处理完成后计算机进入休眠模式"),
+        ]
+        
+        for name, desc in descriptions:
+            row = Frame(desc_frame, bg="white")
+            row.pack(fill='x', pady=2)
+            Label(row, text=f"• {name}:", bg="white", fg="#333", 
+                font=("微软雅黑", 9), width=14, anchor='w').pack(side='left')
+            Label(row, text=desc, bg="white", fg="#666",
+                font=("微软雅黑", 9)).pack(side='left')
+        
+        # ===== 按钮区域 =====
+        btn_frame = Frame(win, bg="white")
+        btn_frame.pack(pady=20)
+        
+        def save_and_close():
+            self._log(f"[info] 设置已保存: 完成后={self.setting_on_complete.get()}, "
+                    f"自动统计={self.setting_auto_show_stats.get()}, "
+                    f"删除完成={self.setting_delete_completed.get()}")
+            win.destroy()
+        
+        Button(btn_frame, text="✓ 确定", command=save_and_close, bg="#4CAF50", fg="white",
+            font=("微软雅黑", 10), relief="flat", width=10).pack(side='left', padx=10)
+        
+        Button(btn_frame, text="✕ 取消", command=win.destroy, bg="#9E9E9E", fg="white",
+            font=("微软雅黑", 10), relief="flat", width=10).pack(side='left', padx=10)
+
+    def _show_help_menu(self):
+        """显示帮助子菜单"""
+        menu = Toplevel(self.root)
+        menu.overrideredirect(True)
+        menu.configure(bg="white", relief="solid", bd=1)
+        
+        # 获取按钮位置
+        x = self.btn_help.winfo_rootx()
+        y = self.btn_help.winfo_rooty() + self.btn_help.winfo_height()
+        menu.geometry(f"+{x}+{y}")
+        
+        menu_style = {"bg": "white", "fg": "#333", "relief": "flat",
+                    "font": ("微软雅黑", 10), "anchor": "w", "padx": 20, "pady": 8,
+                    "activebackground": "#e3f2fd", "activeforeground": "#1976d2"}
+        
+        def on_activation():
+            menu.destroy()
+            self._show_activation_window()
+        
+        def on_usage():
+            menu.destroy()
+            self._show_usage_guide()
+        
+        def on_about():
+            menu.destroy()
+            self._show_about_window()
+        
+        Button(menu, text="🔐 软件激活", width=15, command=on_activation, **menu_style).pack(fill='x')
+        Button(menu, text="📖 使用说明", width=15, command=on_usage, **menu_style).pack(fill='x')
+        Button(menu, text="ℹ️ 关于", width=15, command=on_about, **menu_style).pack(fill='x')
+        
+        # 点击菜单外部时关闭菜单
+        def close_menu(event):
+            try:
+                if not menu.winfo_exists():
+                    return
+                # 获取点击位置
+                click_x = event.x_root
+                click_y = event.y_root
+                # 获取菜单位置和大小
+                menu_x = menu.winfo_rootx()
+                menu_y = menu.winfo_rooty()
+                menu_w = menu.winfo_width()
+                menu_h = menu.winfo_height()
+                # 如果点击在菜单外部，关闭菜单
+                if not (menu_x <= click_x <= menu_x + menu_w and menu_y <= click_y <= menu_y + menu_h):
+                    menu.destroy()
+                    # 解除绑定
+                    try:
+                        self.root.unbind('<Button-1>')
+                    except:
+                        pass
+            except:
+                pass
+        
+        # 延迟绑定，避免立即触发
+        self.root.after(100, lambda: self.root.bind('<Button-1>', close_menu))
+        
+        # 菜单失去焦点时关闭（但不使用 Leave 事件，因为它太敏感）
+        menu.bind('<FocusOut>', lambda e: self.root.after(200, lambda: menu.destroy() if menu.winfo_exists() else None))
+
+    def _show_activation_window(self):
+        """显示软件激活窗口"""
+        win = Toplevel(self.root)
+        win.title("软件激活")
+        win.geometry("420x450")
+        win.configure(bg="white")
+        win.transient(self.root)
+        win.grab_set()
+        win.resizable(False, False)
+        
+        # 居中显示
+        self.root.update_idletasks()
+        main_x = self.root.winfo_x()
+        main_y = self.root.winfo_y()
+        main_w = self.root.winfo_width()
+        main_h = self.root.winfo_height()
+        win_w, win_h = 420, 450
+        x = main_x + (main_w - win_w) // 2
+        y = main_y + (main_h - win_h) // 2
+        win.geometry(f"{win_w}x{win_h}+{x}+{y}")
+        
+        # 标题
+        Label(win, text="🔐 软件激活", bg="white", fg="#333",
+            font=("微软雅黑", 14, "bold")).pack(pady=15)
+        
+        # 激活状态区域
+        status_frame = LabelFrame(win, text="激活状态", bg="white", fg="#333",
+                                font=("微软雅黑", 10, "bold"), padx=15, pady=10)
+        status_frame.pack(fill='x', padx=20, pady=10)
+        
+        if self.activated:
+            status_text = "✅ 软件已激活"
+            status_color = "#4CAF50"
+        else:
+            remaining = getattr(self, 'trial_mins', 15)
+            status_text = f"⚠️ 软件未激活 (试用剩余: {remaining}分钟)"
+            status_color = "#FF9800"
+        
+        status_label = Label(status_frame, text=status_text, bg="white", fg=status_color,
+                            font=("微软雅黑", 12, "bold"))
+        status_label.pack(anchor='w', pady=5)
+        
+        # 机器码
+        Label(status_frame, text="📋 机器码:", bg="white", fg="#333",
+            font=("微软雅黑", 10)).pack(anchor='w', pady=(10, 2))
+        
+        mac_frame = Frame(status_frame, bg="white")
+        mac_frame.pack(fill='x', pady=2)
+        
+        mac_entry = Entry(mac_frame, width=30, font=("Consolas", 11), justify="center",
+                        relief="solid", bd=1)
+        mac_entry.pack(side='left', ipady=4)
+        mac_entry.insert(0, self.mac)
+        mac_entry.config(state='readonly')
+        
+        def copy_mac():
+            self.root.clipboard_clear()
+            self.root.clipboard_append(self.mac)
+            messagebox.showinfo("复制成功", "机器码已复制到剪贴板")
+        
+        Button(mac_frame, text="复制", command=copy_mac, bg="#2196F3", fg="white",
+            font=("微软雅黑", 9), relief="flat", width=6).pack(side='left', padx=10)
+        
+        # 激活密钥输入（仅未激活时显示）
+        if not self.activated:
+            Label(status_frame, text="🔑 激活密钥:", bg="white", fg="#333",
+                font=("微软雅黑", 10)).pack(anchor='w', pady=(15, 2))
+            
+            key_frame = Frame(status_frame, bg="white")
+            key_frame.pack(fill='x', pady=2)
+            
+            key_entry = Entry(key_frame, width=30, font=("Consolas", 11),
+                            justify="center", relief="solid", bd=1)
+            key_entry.pack(side='left', ipady=4)
+            
+            def do_activate():
+                if LicenseManager.verify_key(self.mac, key_entry.get()):
+                    LicenseManager.save_license()
+                    self.activated = True
+                    self.root.title("笔记本高清视频修复 2025 V7.0")
+                    status_label.config(text="✅ 软件已激活", fg="#4CAF50")
+                    messagebox.showinfo("成功", "✅ 激活成功！")
+                    key_frame.pack_forget()
+                    activate_btn.pack_forget()
+                else:
+                    messagebox.showerror("错误", "❌ 密钥无效，请检查后重试")
+            
+            activate_btn = Button(status_frame, text="✅ 立即激活", command=do_activate,
+                                bg="#4CAF50", fg="white", font=("微软雅黑", 10, "bold"),
+                                relief="flat", width=15)
+            activate_btn.pack(pady=10)
+        
+        # FFmpeg检测区域
+        ffmpeg_frame = LabelFrame(win, text="🛠️ FFmpeg 环境", bg="white", fg="#333",
+                                font=("微软雅黑", 10, "bold"), padx=15, pady=10)
+        ffmpeg_frame.pack(fill='x', padx=20, pady=10)
+        
+        ffmpeg_path = PM.get_exe("ffmpeg")
+        is_available = PM.is_exe_available("ffmpeg")
+        
+        if is_available:
+            ffmpeg_status = "✅ FFmpeg 已安装"
+            ffmpeg_color = "#4CAF50"
+        else:
+            ffmpeg_status = "❌ FFmpeg 未安装"
+            ffmpeg_color = "#F44336"
+        
+        Label(ffmpeg_frame, text=ffmpeg_status, bg="white", fg=ffmpeg_color,
+            font=("微软雅黑", 10)).pack(anchor='w')
+        
+        if is_available:
+            Label(ffmpeg_frame, text=f"路径: {ffmpeg_path}", bg="white", fg="#666",
+                font=("微软雅黑", 9)).pack(anchor='w')
+        else:
+            def download_ffmpeg():
+                self._download_ffmpeg_from_activation(win, ffmpeg_frame)
+            
+            Button(ffmpeg_frame, text="📥 下载安装 FFmpeg", command=download_ffmpeg,
+                bg="#FF9800", fg="white", font=("微软雅黑", 10),
+                relief="flat").pack(pady=5)
+        
+        # 客服信息
+        Label(win, text="💬 获取密钥请联系客服: u788990@163.com",
+            bg="white", fg="#666", font=("微软雅黑", 9)).pack(pady=10)
+        
+        # 关闭按钮
+        Button(win, text="关闭", command=win.destroy, bg="#9E9E9E", fg="white",
+            font=("微软雅黑", 10), relief="flat", width=12).pack(pady=10)
+
+    def _download_ffmpeg_from_activation(self, parent_win, ffmpeg_frame):
+        """从激活窗口下载FFmpeg"""
+        if PM.is_exe_available("ffmpeg"):
+            messagebox.showinfo("提示", "FFmpeg 已经安装，无需重复下载")
+            return
+        
+        # 创建进度显示
+        progress_frame = Frame(ffmpeg_frame, bg="white")
+        progress_frame.pack(fill='x', pady=5)
+        
+        progress_label = Label(progress_frame, text="准备下载...", bg="white", fg="#333",
+                            font=("微软雅黑", 9))
+        progress_label.pack(anchor='w')
+        
+        progress_bar = Progressbar(progress_frame, length=300, mode='determinate')
+        progress_bar.pack(fill='x', pady=5)
+        
+        def update_progress(percent):
+            progress_bar['value'] = percent
+            progress_label.config(text=f"下载进度: {percent:.1f}%")
+            self.root.update_idletasks()
+        
+        def download_thread():
+            try:
+                self.root.after(0, lambda: progress_label.config(text="正在下载FFmpeg..."))
+                success = self.downloader.download_component("ffmpeg", progress_cb=update_progress)
+                
+                if success:
+                    PM.refresh()
+                    self.root.after(0, lambda: [
+                        progress_label.config(text="✅ FFmpeg 安装成功!"),
+                        messagebox.showinfo("成功", "FFmpeg 安装成功！")
+                    ])
+                else:
+                    self.root.after(0, lambda: [
+                        progress_label.config(text="❌ 下载失败，请检查网络"),
+                        messagebox.showerror("失败", "下载失败，请检查网络连接")
+                    ])
+            except Exception as e:
+                self.root.after(0, lambda: progress_label.config(text=f"❌ 错误: {str(e)[:30]}"))
+        
+        threading.Thread(target=download_thread, daemon=True).start()
+
+    def _show_usage_guide(self):
+        """显示使用说明窗口"""
+        win = Toplevel(self.root)
+        win.title("使用说明")
+        win.geometry("550x600")
+        win.configure(bg="white")
+        win.transient(self.root)
+        win.resizable(False, False)
+        
+        # 居中显示
+        self.root.update_idletasks()
+        main_x = self.root.winfo_x()
+        main_y = self.root.winfo_y()
+        main_w = self.root.winfo_width()
+        main_h = self.root.winfo_height()
+        win_w, win_h = 550, 600
+        x = main_x + (main_w - win_w) // 2
+        y = main_y + (main_h - win_h) // 2
+        win.geometry(f"{win_w}x{win_h}+{x}+{y}")
+        
+        # 标题
+        Label(win, text="📖 使用说明", bg="white", fg="#333",
+            font=("微软雅黑", 14, "bold")).pack(pady=15)
+        
+        # 滚动文本区域
+        text_frame = Frame(win, bg="white")
+        text_frame.pack(fill='both', expand=True, padx=20, pady=10)
+        
+        scrollbar = Scrollbar(text_frame)
+        scrollbar.pack(side='right', fill='y')
+        
+        text = Text(text_frame, wrap='word', font=("微软雅黑", 10), bg="white",
+                    relief="solid", bd=1, yscrollcommand=scrollbar.set)
+        text.pack(fill='both', expand=True)
+        scrollbar.config(command=text.yview)
+        
+        guide_content = """
+    【软件简介】
+    笔记本高清视频修复 2025 V7.0 是一款专业的视频后期处理工具，采用专业8步修复流程，支持GPU加速。
+
+    【快速开始】
+    1. 添加任务：点击"添加任务"按钮或直接拖拽视频文件到窗口
+    2. 配置处理：在弹出的对话框中选择需要的处理选项
+    3. 开始处理：点击"开始"按钮开始处理视频
+    4. 查看结果：处理完成后可在原视频目录找到输出文件
+
+    【处理功能说明】
+
+    🔧 细节修复（专业8步流程）
+    - 伪影移除 - 去除视频中的块状伪影和色带
+    - 预锐化 - 边缘增强，自动回调避免过锐
+    - 抗锯齿 - 平滑锯齿边缘
+    - 去噪 - 智能降噪，保留细节
+    - 人脸修复 - 优化人脸区域
+    - 毛发保护 - 保留毛发细节
+    - 最终锐化 - 轻微锐化提升清晰度
+    - 颗粒添加 - 可选，增加胶片质感
+
+    🎨 智能后期
+    - 提亮/对比/鲜艳 - 基础调色
+    - 冷白/压光 - 色温和高光调整
+    - 锐化/质感 - 提升画面质感
+
+    🎭 滤镜效果
+    - 风景/老电影/电影/动漫 - 一键风格化
+
+    🔬 高级后期
+    - 自动白平衡/色阶 - 智能校色
+    - 降噪/暗部/高光恢复 - 细节优化
+    - 去雾 - 去除画面雾气
+
+    【强度说明】
+    - 轻度：适合画质较好的视频，轻微优化
+    - 中度：适合大部分视频，平衡效果
+    - 重度：适合画质较差的视频，强力修复
+
+    【智能模式】
+    开启后会自动分析画面质量，跳过不需要的处理步骤，提高效率。
+
+    【资源占用】
+    可通过右上角滑块调整处理时的系统资源占用比例（30%-100%）。
+
+    【输出格式】
+    输出使用H.264编码的MP4格式，兼容性好。
+
+    【注意事项】
+    - 处理前请确保FFmpeg已正确安装
+    - 建议处理前先备份原视频
+    - 大文件处理可能需要较长时间
+    """
+        
+        text.insert('1.0', guide_content)
+        text.config(state='disabled')
+        
+        # 关闭按钮
+        Button(win, text="关闭", command=win.destroy, bg="#9E9E9E", fg="white",
+            font=("微软雅黑", 10), relief="flat", width=12).pack(pady=15)
+
+    def _show_about_window(self):
+        """显示关于窗口"""
+        win = Toplevel(self.root)
+        win.title("关于")
+        win.geometry("400x350")
+        win.configure(bg="white")
+        win.transient(self.root)
+        win.resizable(False, False)
+        
+        # 居中显示
+        self.root.update_idletasks()
+        main_x = self.root.winfo_x()
+        main_y = self.root.winfo_y()
+        main_w = self.root.winfo_width()
+        main_h = self.root.winfo_height()
+        win_w, win_h = 400, 350
+        x = main_x + (main_w - win_w) // 2
+        y = main_y + (main_h - win_h) // 2
+        win.geometry(f"{win_w}x{win_h}+{x}+{y}")
+        
+        # 图标/标题
+        Label(win, text="🎬", font=("", 50), bg="white").pack(pady=20)
+        
+        Label(win, text="笔记本高清视频修复 2025", bg="white", fg="#333",
+            font=("微软雅黑", 16, "bold")).pack()
+        
+        Label(win, text="V7.0 后期处理专版", bg="white", fg="#666",
+            font=("微软雅黑", 11)).pack(pady=5)
+        
+        # 分隔线
+        Frame(win, bg="#e0e0e0", height=1).pack(fill='x', padx=40, pady=15)
+        
+        # 功能说明
+        Label(win, text="专业8步修复流程，支持GPU加速", bg="white", fg="#333",
+            font=("微软雅黑", 10)).pack()
+        
+        # GPU状态
+        Label(win, text=f"当前设备: {self.gpu.get_status()}", bg="white", fg="#666",
+            font=("微软雅黑", 9)).pack(pady=10)
+        
+        # 激活状态
+        if self.activated:
+            status_text = "✅ 已激活"
+            status_color = "#4CAF50"
+        else:
+            status_text = "⚠️ 试用版"
+            status_color = "#FF9800"
+        
+        Label(win, text=f"授权状态: {status_text}", bg="white", fg=status_color,
+            font=("微软雅黑", 10)).pack()
+        
+        # 联系方式
+        Label(win, text="客服邮箱: u788990@163.com", bg="white", fg="#999",
+            font=("微软雅黑", 9)).pack(pady=15)
+        
+        # 关闭按钮
+        Button(win, text="关闭", command=win.destroy, bg="#9E9E9E", fg="white",
+            font=("微软雅黑", 10), relief="flat", width=12).pack(pady=10)
+
+    def _check_ffmpeg_and_show(self, parent_win=None):
+        """检测FFmpeg并更新显示"""
+        PM.refresh()
+        
+        ffmpeg_path = PM.get_exe("ffmpeg")
+        is_available = PM.is_exe_available("ffmpeg")
+        
+        if is_available:
+            self.ffmpeg_status_label.config(text="✅ FFmpeg 已安装", fg="#4CAF50")
+            self.ffmpeg_path_label.config(text=f"路径: {ffmpeg_path}")
+            self.ffmpeg_download_btn.config(state=DISABLED, text="✓ 已安装")
+        else:
+            self.ffmpeg_status_label.config(text="❌ FFmpeg 未安装", fg="#F44336")
+            self.ffmpeg_path_label.config(text="需要下载安装FFmpeg才能处理视频")
+            self.ffmpeg_download_btn.config(state=NORMAL, text="📥 下载安装 FFmpeg")
+        
+        return is_available
+
+    def _download_ffmpeg_ui(self, parent_win):
+        """下载安装FFmpeg"""
+        if PM.is_exe_available("ffmpeg"):
+            messagebox.showinfo("提示", "FFmpeg 已经安装，无需重复下载")
+            return
+        
+        # 显示进度区域
+        self.ffmpeg_progress_frame.pack(fill='x', pady=10)
+        self.ffmpeg_progress_bar['value'] = 0
+        self.ffmpeg_progress_label.config(text="准备下载...")
+        
+        # 禁用按钮
+        self.ffmpeg_download_btn.config(state=DISABLED, text="正在下载...")
+        self.ffmpeg_check_btn.config(state=DISABLED)
+        
+        def update_progress(percent):
+            self.ffmpeg_progress_bar['value'] = percent
+            self.ffmpeg_progress_label.config(text=f"下载进度: {percent:.1f}%")
+            self.root.update_idletasks()
+        
+        def download_thread():
+            try:
+                self.root.after(0, lambda: self.ffmpeg_progress_label.config(text="正在下载FFmpeg..."))
+                
+                success = self.downloader.download_component("ffmpeg", progress_cb=update_progress)
+                
+                if success:
+                    PM.refresh()
+                    self.root.after(0, lambda: self._on_ffmpeg_download_complete(True, parent_win))
+                else:
+                    self.root.after(0, lambda: self._on_ffmpeg_download_complete(False, parent_win))
+            except Exception as e:
+                self.root.after(0, lambda: self._on_ffmpeg_download_complete(False, parent_win, str(e)))
+        
+        threading.Thread(target=download_thread, daemon=True).start()
+
+    def _on_ffmpeg_download_complete(self, success, parent_win, error_msg=None):
+        """FFmpeg下载完成回调"""
+        self.ffmpeg_check_btn.config(state=NORMAL)
+        
+        if success:
+            self.ffmpeg_progress_label.config(text="✅ FFmpeg 安装成功!")
+            self.ffmpeg_progress_bar['value'] = 100
+            self.ffmpeg_status_label.config(text="✅ FFmpeg 已安装", fg="#4CAF50")
+            self.ffmpeg_path_label.config(text=f"路径: {PM.get_exe('ffmpeg')}")
+            self.ffmpeg_download_btn.config(text="✓ 已安装", state=DISABLED)
+            messagebox.showinfo("成功", "FFmpeg 安装成功！现在可以开始处理视频了。")
+        else:
+            self.ffmpeg_progress_label.config(text=f"❌ 下载失败: {error_msg or '请检查网络'}")
+            self.ffmpeg_download_btn.config(state=NORMAL, text="📥 重新下载")
+            messagebox.showerror("下载失败", f"FFmpeg下载失败\n{error_msg or '请检查网络连接后重试'}")
+        
+        # 2秒后隐藏进度条
+        self.root.after(2000, lambda: self.ffmpeg_progress_frame.pack_forget())
+
+    def run(self):
+        self.root.mainloop()
 
 # ==================== 程序入口 ====================
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    app.setStyle("Fusion")
-    
-    pass
-    
-    w = MainWindow()
-    w.show()
-    sys.exit(app.exec())
-
+    app = App()
+    app.run()
