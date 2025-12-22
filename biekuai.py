@@ -54,27 +54,45 @@ class PathManager:
         self._init_paths()
     
     def _init_paths(self):
-        if getattr(sys, 'frozen', False):
+        # 1. 识别是否处于打包环境
+        self.is_frozen = getattr(sys, 'frozen', False)
+        
+        # 2. 获取 EXE 所在的真实物理目录（用于存放输出视频、配置文件、授权文件）
+        if self.is_frozen:
             self.app_dir = os.path.dirname(sys.executable)
         else:
             self.app_dir = os.path.dirname(os.path.abspath(__file__))
-        
+            
+        # 3. 获取程序运行时的目录（Nuitka onefile 模式解压后的临时目录）
+        # 内部打包进去的 FFmpeg 应该在这个目录下找
+        self.runtime_dir = os.path.dirname(os.path.abspath(__file__))
+
         possible_bases = [
             self.app_dir,
             os.path.join(self.app_dir, "ide2025"),
-            os.path.join(os.path.expanduser("~"), "ide2025"),
-            r"C:\ide2025",
-            os.path.join(os.environ.get('LOCALAPPDATA', ''), "ide2025"),
+            os.path.expanduser("~/ide2025"),
         ]
         
         self.base_dir = self._select_best_base(possible_bases)
-        # 修改：将tools_dir改为fongzhuang文件夹
-        self.tools_dir = os.path.join(self.base_dir, "fongzhuang")
+        
+        # --- 核心修改：区分外部工具目录和物理工作目录 ---
+        
+        # 如果打包时把 fongzhuang 文件夹包含进去了，它会在 runtime_dir 下
+        internal_tools = os.path.join(self.runtime_dir, "fongzhuang")
+        external_tools = os.path.join(self.base_dir, "fongzhuang")
+        
+        # 优先使用内部打包的工具，如果没有（比如开发环境），再用外部的
+        if os.path.exists(internal_tools):
+            self.tools_dir = internal_tools
+        else:
+            self.tools_dir = external_tools
+            
         self.temp_dir = os.path.join(self.base_dir, "temp")
         self.output_dir = os.path.join(self.base_dir, "output")
         self.config_file = os.path.join(self.base_dir, "config.json")
         
-        for d in [self.base_dir, self.tools_dir, self.temp_dir, self.output_dir]:
+        # 创建必要目录
+        for d in [self.base_dir, self.temp_dir, self.output_dir]:
             self._safe_makedirs(d)
         
         self.exes = {}
@@ -2364,6 +2382,20 @@ class App:
     }
     
     def __init__(self):
+        # --- 新增：强制允许 Windows 拖拽消息通过过滤（防管理员模式失效） ---
+        if sys.platform == 'win32':
+            try:
+                import ctypes
+                from ctypes import wintypes
+                # 允许 WM_DROPFILES (0x233) 和 WM_COPYDATA (0x004A) 等消息
+                for msg in [0x0233, 0x004A, 0x0049]:
+                    ctypes.windll.user32.ChangeWindowMessageFilterEx(
+                        ctypes.windll.user32.GetActiveWindow(), 
+                        msg, 1, None
+                    )
+            except:
+                pass
+        # ---------------------------------------------------------
         try:
             from tkinterdnd2 import DND_FILES, TkinterDnD
             self.root = TkinterDnD.Tk()
