@@ -1,4 +1,4 @@
-# video_sprites_gui_enhanced_v7_6.py
+# biekuai.py
 # Enhanced version v7.6 - 极速专业版 (完整修复版)
 # 
 # 【v7.6 修复与改进】
@@ -5592,3 +5592,4 @@ if __name__ == "__main__":
     w = MainWindow()
     w.show()
     sys.exit(app.exec())
+
