@@ -128,7 +128,7 @@ jobs:
           # GUI 设置与图标
           disable-console: true
           windows-icon-from-ico: ${{ steps.detect.outputs.icon }}
-          windows-uac-admin: true
+          windows-uac-admin: false
           
           # 核心修复：动态拼接插件字符串，防止末尾出现多余逗号
           enable-plugins: ${{ github.event.inputs.enable_plugins != '' && format('pyside6,{0}', github.event.inputs.enable_plugins) || 'pyside6' }}
