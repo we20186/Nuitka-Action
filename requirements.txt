@@ -1,3 +1,4 @@
+# Nuitka 打包压缩与兼容性优化
 
 ordered-set==4.1.0
     # via -r requirements.in
@@ -8,10 +9,7 @@ zstandard==0.20.0
 opencv-python==4.8.0.76
 numpy==1.26.4
 Pillow==10.2.0
+PySide6==6.10.1
 
-# 拖拽功能核心库
-tkinterdnd2==0.3.0
 
-# Nuitka 打包压缩与兼容性优化
-zstandard==0.22.0
-ordered-set==4.1.0
+
